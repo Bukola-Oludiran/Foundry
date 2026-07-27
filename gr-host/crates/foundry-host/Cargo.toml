@@ -1,0 +1,15 @@
+[package]
+name = "foundry-host"
+version.workspace = true
+edition.workspace = true
+description = "Foundry control-plane host: compiles an IR, runs a supervised bottom-up build on graphreact-core, driving the pi-pool over HTTP."
+
+[[bin]]
+name = "foundry-host"
+path = "src/main.rs"
+
+[dependencies]
+foundry-ir = { path = "../foundry-ir" }
+graphreact-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,20 @@
+# Build outputs
+target/
+dist/
+
+# Dependencies
+node_modules/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+
+# Editor and OS metadata
+.DS_Store
+*.swp
+*.swo
+
+# Logs and caches
+*.log
+.cache/

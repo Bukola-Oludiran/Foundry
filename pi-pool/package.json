@@ -1,0 +1,10 @@
+{
+  "name": "@foundry/pi-pool",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Foundry data-plane worker pool: /build (doer, pi) + /test (tester, deterministic → Piston).",
+  "scripts": {
+    "validate:runner-gen": "node scripts/validate-runner-gen.ts"
+  }
+}

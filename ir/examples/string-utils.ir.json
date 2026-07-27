@@ -1,0 +1,149 @@
+{
+  "spec": {
+    "name": "string-utils",
+    "description": "A tiny string utility library exposing slugify, composed from lowercase, trim, and hyphenate primitives. The v1 falsification-instrument spec: small, pure, cleanly Piston-judgeable, a one-level ownership tree with a fan-in dependency DAG.",
+    "language": "python"
+  },
+  "root": "string-utils",
+  "nodes": [
+    {
+      "id": "string-utils",
+      "kind": "integrator",
+      "owner": null,
+      "provides": {
+        "name": "StringUtils",
+        "operations": [
+          {
+            "name": "slugify",
+            "signature": "slugify(s: string) -> string",
+            "description": "Turn arbitrary text into a URL slug.",
+            "properties": [
+              "output matches ^[a-z0-9]+(-[a-z0-9]+)*$ or is empty",
+              "idempotent: slugify(slugify(s)) == slugify(s)",
+              "collapses internal whitespace runs to a single hyphen"
+            ]
+          }
+        ]
+      },
+      "requires": [
+        { "node": "lowercase", "interface": "Lowercase" },
+        { "node": "trim", "interface": "Trim" },
+        { "node": "hyphenate", "interface": "Hyphenate" }
+      ],
+      "implementation": {
+        "children": ["lowercase", "trim", "hyphenate"],
+        "write_target": "src/string_utils.py",
+        "composition": "slugify(s) = hyphenate(trim(lower(s)))"
+      },
+      "acceptance": {
+        "mandate_owner": "spec",
+        "language": "python",
+        "cases": [
+          { "name": "basic", "call": "slugify('  Hello World! ')", "expect": "hello-world" },
+          { "name": "collapse-spaces", "call": "slugify('a   b')", "expect": "a-b" },
+          { "name": "strip-symbols", "call": "slugify('C++ & Rust')", "expect": "c-rust" },
+          { "name": "empty", "call": "slugify('   ')", "expect": "" },
+          { "name": "idempotent", "call": "slugify(slugify('Foo Bar'))", "expect": "foo-bar" }
+        ],
+        "properties": [
+          "for all s: slugify(s) matches ^[a-z0-9]+(-[a-z0-9]+)*$ or == ''"
+        ]
+      }
+    },
+    {
+      "id": "lowercase",
+      "kind": "leaf",
+      "owner": "string-utils",
+      "provides": {
+        "name": "Lowercase",
+        "operations": [
+          {
+            "name": "lower",
+            "signature": "lower(s: string) -> string",
+            "description": "ASCII-lowercase a string.",
+            "properties": ["idempotent", "preserves length", "only case changes"]
+          }
+        ]
+      },
+      "implementation": {
+        "language": "python",
+        "write_target": "src/lowercase.py",
+        "entrypoint": "lowercase.py"
+      },
+      "acceptance": {
+        "mandate_owner": "string-utils",
+        "language": "python",
+        "cases": [
+          { "name": "basic", "call": "lower('HeLLo')", "expect": "hello" },
+          { "name": "noop", "call": "lower('abc')", "expect": "abc" },
+          { "name": "digits-untouched", "call": "lower('A1B2')", "expect": "a1b2" }
+        ]
+      }
+    },
+    {
+      "id": "trim",
+      "kind": "leaf",
+      "owner": "string-utils",
+      "provides": {
+        "name": "Trim",
+        "operations": [
+          {
+            "name": "trim",
+            "signature": "trim(s: string) -> string",
+            "description": "Strip leading/trailing whitespace.",
+            "properties": ["idempotent", "no internal whitespace change"]
+          }
+        ]
+      },
+      "implementation": {
+        "language": "python",
+        "write_target": "src/trim.py",
+        "entrypoint": "trim.py"
+      },
+      "acceptance": {
+        "mandate_owner": "string-utils",
+        "language": "python",
+        "cases": [
+          { "name": "both-ends", "call": "trim('  hi  ')", "expect": "hi" },
+          { "name": "noop", "call": "trim('hi')", "expect": "hi" },
+          { "name": "keeps-internal", "call": "trim('  a b  ')", "expect": "a b" }
+        ]
+      }
+    },
+    {
+      "id": "hyphenate",
+      "kind": "leaf",
+      "owner": "string-utils",
+      "provides": {
+        "name": "Hyphenate",
+        "operations": [
+          {
+            "name": "hyphenate",
+            "signature": "hyphenate(s: string) -> string",
+            "description": "Lowercase-assumed input: replace internal whitespace runs with a single hyphen and drop any char that is not [a-z0-9] or a resulting hyphen.",
+            "properties": [
+              "collapses whitespace runs to one hyphen",
+              "drops chars outside [a-z0-9-]",
+              "no leading/trailing hyphen"
+            ]
+          }
+        ]
+      },
+      "implementation": {
+        "language": "python",
+        "write_target": "src/hyphenate.py",
+        "entrypoint": "hyphenate.py"
+      },
+      "acceptance": {
+        "mandate_owner": "string-utils",
+        "language": "python",
+        "cases": [
+          { "name": "spaces", "call": "hyphenate('hello world')", "expect": "hello-world" },
+          { "name": "collapse", "call": "hyphenate('a   b')", "expect": "a-b" },
+          { "name": "drop-symbols", "call": "hyphenate('c++ rust')", "expect": "c-rust" },
+          { "name": "no-edge-hyphens", "call": "hyphenate('  hi  ')", "expect": "hi" }
+        ]
+      }
+    }
+  ]
+}

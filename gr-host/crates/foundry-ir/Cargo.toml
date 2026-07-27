@@ -1,0 +1,12 @@
+[package]
+name = "foundry-ir"
+version.workspace = true
+edition.workspace = true
+description = "Foundry dyad IR: serde types + deterministic IR→dependency-DAG compiler."
+
+[dependencies]
+graphreact-algorithms.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true

@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://foundry.local/schema/dyad-ir.json",
+  "title": "Foundry Dyad IR",
+  "description": "The formal, deterministically-compilable intermediate representation an architecture role emits. A flat list of nodes carrying two overlaid graphs: an ownership TREE (via `owner`) and a dependency DAG (via `requires`). Every node is a dyad: a doer implements `provides`; an independent tester verifies it against `acceptance`, whose mandate is owned by the node's parent (never the node itself).",
+  "type": "object",
+  "required": ["spec", "root", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "spec": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "language": {
+          "type": "string",
+          "description": "Default implementation language for leaves that don't override it (a Piston-supported runtime, e.g. 'python', 'typescript')."
+        }
+      }
+    },
+    "root": {
+      "type": "string",
+      "description": "Id of the root node. Its `owner` MUST be null; its `acceptance.mandate_owner` is 'spec' (the Chairman's top-level acceptance)."
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "kind", "owner", "provides", "acceptance"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "kind": {
+          "enum": ["leaf", "integrator"],
+          "description": "leaf = the doer writes real code. integrator = the doer writes glue composing this node's children."
+        },
+        "owner": {
+          "type": ["string", "null"],
+          "description": "Parent (manager) node id — the ownership TREE edge. null only for `root`. The owner authors this node's acceptance mandate."
+        },
+        "provides": {
+          "$ref": "#/$defs/interface",
+          "description": "The single interface this node promises UPWARD to its owner. Held stable across interface-preserving re-architecture."
+        },
+        "requires": {
+          "type": "array",
+          "description": "Interfaces this node consumes. Each entry is a dependency-DAG edge (this node depends_on ref.node). Must reference an interface actually provided by an existing node.",
+          "items": { "$ref": "#/$defs/interfaceRef" },
+          "default": []
+        },
+        "implementation": { "$ref": "#/$defs/implementation" },
+        "acceptance": {
+          "$ref": "#/$defs/testBundle",
+          "description": "The parent-owned, black-box acceptance suite the tester runs via Piston. Verifies `provides` (and, for integrators, composed behavior) — NOT the internals."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "leaf" } } },
+          "then": {
+            "properties": { "implementation": { "$ref": "#/$defs/leafImpl" } },
+            "required": ["implementation"]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "integrator" } } },
+          "then": {
+            "properties": { "implementation": { "$ref": "#/$defs/integratorImpl" } },
+            "required": ["implementation"]
+          }
+        }
+      ]
+    },
+    "interface": {
+      "type": "object",
+      "required": ["name", "operations"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/operation" }
+        },
+        "types": {
+          "type": "array",
+          "description": "Optional named type/shape definitions the operations reference.",
+          "items": {
+            "type": "object",
+            "required": ["name", "definition"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "definition": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "required": ["name", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "signature": {
+          "type": "string",
+          "description": "Language-neutral signature, e.g. 'slugify(s: string) -> string'."
+        },
+        "description": { "type": "string" },
+        "properties": {
+          "type": "array",
+          "description": "Behavioral contract clauses (NOT just the type signature) — the leaky-interface guard. e.g. 'idempotent', 'output matches ^[a-z0-9-]+$'.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "interfaceRef": {
+      "type": "object",
+      "required": ["node", "interface"],
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": "string", "description": "Id of the providing node." },
+        "interface": { "type": "string", "description": "Name of that node's provided interface." }
+      }
+    },
+    "leafImpl": {
+      "type": "object",
+      "required": ["language", "write_target"],
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "type": "string",
+          "description": "A Piston-supported runtime the doer writes in (e.g. 'python', 'typescript')."
+        },
+        "write_target": {
+          "type": "string",
+          "description": "Repo-relative path/dir the doer may WRITE (the sandbox write scope). The doer's read-set is derived by the compiler = each required node's write_target, mounted read-only."
+        },
+        "entrypoint": {
+          "type": "string",
+          "description": "Optional file within write_target that exports `provides`."
+        }
+      }
+    },
+    "integratorImpl": {
+      "type": "object",
+      "required": ["children", "write_target"],
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ids of the child nodes this integrator composes. These are the ownership-TREE children (each child's `owner` must equal this node's id).",
+          "items": { "type": "string" }
+        },
+        "write_target": {
+          "type": "string",
+          "description": "Repo-relative path/dir for the glue/composition code the integrator's doer writes."
+        },
+        "composition": {
+          "type": "string",
+          "description": "Optional prose/pseudocode describing how children compose to satisfy `provides` (e.g. 'slugify(s) = hyphenate(trim(lower(s)))')."
+        }
+      }
+    },
+    "testBundle": {
+      "type": "object",
+      "required": ["mandate_owner", "language", "cases"],
+      "additionalProperties": false,
+      "properties": {
+        "mandate_owner": {
+          "type": "string",
+          "description": "Id of the node that OWNS this acceptance mandate (the parent), or 'spec' for the root. Integrity rule: never equal to the node's own id — the doer cannot author its own exam."
+        },
+        "language": {
+          "type": "string",
+          "description": "Piston runtime the acceptance suite executes under."
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Deterministic, executable test cases (LeetCode-style). Each is judged pass/fail by Piston.",
+          "items": { "$ref": "#/$defs/testCase" }
+        },
+        "properties": {
+          "type": "array",
+          "description": "Optional property-based invariants to fuzz (behavioral contract, beyond fixed cases).",
+          "items": { "type": "string" }
+        },
+        "perf": {
+          "type": "object",
+          "description": "Optional LeetCode-style resource limits enforced by Piston.",
+          "additionalProperties": false,
+          "properties": {
+            "time_ms": { "type": "integer", "minimum": 1 },
+            "mem_mb": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "testCase": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "call": {
+          "type": "string",
+          "description": "Expression exercising `provides`, e.g. \"slugify('  Hello World! ')\"."
+        },
+        "expect": {
+          "description": "Expected result of `call` (any JSON value)."
+        },
+        "harness": {
+          "type": "string",
+          "description": "Optional full test-body source (for cases that need setup/state beyond call/expect)."
+        }
+      }
+    }
+  }
+}
