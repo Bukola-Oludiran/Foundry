@@ -5,11 +5,13 @@ command. The doer becomes a **real LLM** writing the modules; the tester becomes
 (The architecture-role agent — spec→IR — is a separate later piece; here we compile the
 hand-authored `ir/examples/string-utils.ir.json`.)
 
-## Switch 1 — Piston (needs Colima healthy)
+Run these commands from the repository root unless noted otherwise.
+
+## Switch 1 — Piston
 
 ```bash
-colima restart                         # clears the unpigz VM fault + the unhealthy provium-dev stack
-cd ~/jays-workspace/piston && docker compose up -d
+export PISTON_DIR=/path/to/your/piston-checkout
+docker compose -f "$PISTON_DIR/docker-compose.yml" up -d
 curl -s -XPOST http://127.0.0.1:2000/api/v2/packages \
   -H 'content-type: application/json' -d '{"language":"python","version":"3.*"}'
 curl -s http://127.0.0.1:2000/api/v2/runtimes    # confirm a python runtime is listed
@@ -18,9 +20,8 @@ curl -s http://127.0.0.1:2000/api/v2/runtimes    # confirm a python runtime is l
 ## Switch 2 — a provider + key, and make pi-ai resolvable
 
 ```bash
-cd ~/jays-workspace/Foundry/pi-pool
-npm install ../../DextersLab/pi-mono/packages/ai      # or: npm i @mariozechner/pi-ai
-#   pi-ai must be built (dist/ present) — run `npm run build` in pi-mono/packages/ai if needed
+npm install --prefix pi-pool
+npm install --prefix pi-pool @mariozechner/pi-ai
 export ANTHROPIC_API_KEY=sk-ant-...                   # pi-ai auto-resolves it via getEnvApiKey
 ```
 
@@ -31,10 +32,11 @@ export ANTHROPIC_API_KEY=sk-ant-...                   # pi-ai auto-resolves it v
 FOUNDRY_LLM_PROVIDER=anthropic \
 FOUNDRY_LLM_MODEL=claude-sonnet-4-20250514 \          # any valid getModel('anthropic', <id>) id
 FOUNDRY_TESTER=piston \
-PORT=8811 node src/server.ts &                        # logs: LLM=anthropic/…, tester=piston
+PORT=8811 node pi-pool/src/server.ts &                # logs: LLM=anthropic/…, tester=piston
 
-~/jays-workspace/Foundry/gr-host/target/debug/foundry-host \
-  --ir ~/jays-workspace/Foundry/ir/examples/string-utils.ir.json \
+cargo build --manifest-path gr-host/Cargo.toml
+./gr-host/target/debug/foundry-host \
+  --ir ./ir/examples/string-utils.ir.json \
   --pi-pool http://127.0.0.1:8811 \
   --workspace /tmp/foundry-live
 ```
