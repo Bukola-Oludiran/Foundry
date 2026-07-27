@@ -7,13 +7,14 @@
 import { runSandboxed } from "../src/sandbox.ts";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 if (process.platform !== "darwin") {
   console.log("SKIP — sandbox validation is macOS/Seatbelt only (Linux Landlock adapter is TODO)");
   process.exit(0);
 }
 
-const SCRATCH = "/private/tmp/claude-501/-Users-damioludiran-jays-workspace/a5be29ce-6b3e-4e08-8895-00df35313dae/scratchpad";
+const SCRATCH = tmpdir();
 
 const ws = mkdtempSync(join(SCRATCH, "foundry-ws-"));
 const srcDir = join(ws, "src");
