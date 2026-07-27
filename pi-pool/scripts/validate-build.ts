@@ -13,9 +13,10 @@ import type { BuildRequest, DepRef, Interface } from "../src/contract.ts";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-const IR = "/Users/damioludiran/jays-workspace/Foundry/ir/examples/string-utils.ir.json";
-const SCRATCH = "/private/tmp/claude-501/-Users-damioludiran-jays-workspace/a5be29ce-6b3e-4e08-8895-00df35313dae/scratchpad";
+const IR = new URL("../../ir/examples/string-utils.ir.json", import.meta.url);
+const SCRATCH = tmpdir();
 const sanitize = (id: string): string => id.replace(/-/g, "_");
 const fence = (code: string): string => "```python\n" + code + "\n```";
 
