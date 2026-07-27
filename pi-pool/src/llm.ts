@@ -34,7 +34,7 @@ export class StubLlm implements LlmClient {
  * Real provider via @mariozechner/pi-ai `completeSimple` (verified against
  * packages/ai/src/stream.ts:52 + models.ts:20). Lazily imported so the stub path needs
  * no install. M5 activation = (a) make `@mariozechner/pi-ai` resolvable in pi-pool
- * (`npm install`, or link the local `../../DextersLab/pi-mono/packages/ai` build), and
+ * (`npm install @mariozechner/pi-ai`), and
  * (b) set the provider's env key (e.g. ANTHROPIC_API_KEY) — pi-ai auto-resolves it via
  * getEnvApiKey. `getModel`/`completeSimple` are accessed with loose casts because their
  * generic types key off pi-ai's generated MODELS table, which we address at runtime.
