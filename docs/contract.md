@@ -1,7 +1,7 @@
 # Contract: GR-host ↔ pi-pool ↔ Piston
 
 The control plane (GR host, Rust) drives the data plane (pi workers, Node/TS) over HTTP. The pi-pool
-in turn drives **Piston** (`~/jays-workspace/piston`, engineer-man) as the executable oracle.
+in turn drives **Piston** as the executable oracle.
 Authoritative TypeScript types: [`../pi-pool/src/contract.ts`](../pi-pool/src/contract.ts). This
 doc is the prose spec; the Rust host mirrors these shapes.
 
@@ -98,8 +98,8 @@ A failure entry: `{ "case": "collapse", "expected": "a-b", "actual": "a--b", "er
 ## Piston bring-up (one-time, local)
 
 ```bash
-cd ~/jays-workspace/piston
-docker compose up -d                                   # api on :2000
+export PISTON_DIR=/path/to/your/piston-checkout
+docker compose -f "$PISTON_DIR/docker-compose.yml" up -d # api on :2000
 curl -s http://127.0.0.1:2000/api/v2/runtimes          # list installed
 # install the python runtime via ppman:
 curl -s -XPOST http://127.0.0.1:2000/api/v2/packages \
