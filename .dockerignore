@@ -1,0 +1,7 @@
+**
+!deploy/
+!deploy/piston/
+!deploy/piston/Dockerfile
+!deploy/piston/install-system-python.sh
+!deploy/piston/python-system/
+!deploy/piston/python-system/**

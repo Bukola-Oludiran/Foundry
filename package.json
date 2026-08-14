@@ -1,0 +1,42 @@
+{
+  "name": "foundry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "pi-pool"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test src/**/*.test.ts pi-pool/scripts/validate-build.ts pi-pool/scripts/validate-feedback.ts pi-pool/scripts/validate-runner-gen.ts pi-pool/scripts/validate-sandbox.ts pi-pool/scripts/validate-server.ts",
+    "test:piston": "node --import tsx pi-pool/scripts/validate-m3.ts && node --import tsx pi-pool/scripts/validate-assembly-piston.ts && node --import tsx pi-pool/scripts/validate-service-piston.ts",
+    "test:product-runtime-local": "node --import tsx pi-pool/scripts/validate-product-runtime-local.ts",
+    "test:product-piston": "node --import tsx pi-pool/scripts/validate-product-piston.ts",
+    "test:mcp": "node --import tsx --test src/mcp/**/*.test.ts src/core/**/*.test.ts",
+    "test:oidc-live": "node --import tsx src/mcp/validate-keycloak.ts",
+    "test:rust": "cargo test --manifest-path gr-host/Cargo.toml --workspace --offline",
+    "mcp:stdio": "node --import tsx src/mcp/stdio.ts",
+    "mcp:http": "node --import tsx src/mcp/http.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/express": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "jose": "^6.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.1.0"
+  }
+}

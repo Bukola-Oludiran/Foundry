@@ -18,3 +18,9 @@ node_modules/
 # Logs and caches
 *.log
 .cache/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local service checkouts and state
+.services/

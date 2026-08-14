@@ -1,0 +1,151 @@
+{
+  "version": 5,
+  "requirements": [
+    { "id": "req-digest", "kind": "functional", "text": "Return a deterministic Rust-produced checksum through the public HTTP API.", "priority": "must" },
+    { "id": "req-malformed", "kind": "quality", "text": "Reject malformed process input with a typed error.", "priority": "must" },
+    { "id": "req-restart", "kind": "quality", "text": "Preserve deterministic behavior after service restart.", "priority": "must" },
+    { "id": "req-package", "kind": "delivery", "text": "Produce six reproducible release deliverables that run outside source trees.", "priority": "must" }
+  ],
+  "product": {
+    "id": "hash-relay",
+    "kind": "composite",
+    "mandate": { "outcome": "Deliver a reproducible mixed Rust and Node checksum product." },
+    "contracts": [{ "id": "product-api", "name": "ProductApi", "operations": [{ "name": "checksum", "signature": "checksum(bytes): ChecksumResponse", "parameters": [{ "name": "bytes", "type": "bytes" }], "returns": "ChecksumResponse" }] }],
+    "acceptance": [{ "id": "product-acceptance", "name": "Product relays a deterministic checksum", "covers": ["req-digest", "req-restart"], "steps": [{ "id": "product-checksum", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": { "digest": "a430d84680aabd0b" } } }] }],
+    "capabilityRefs": [{ "id": "mixed-rust-node-product", "version": "1.0.0", "config": { "rustBinary": "checksum-cli", "nodeEntrypoint": "gateway/server", "healthRoute": "/health" } }],
+    "children": [
+      {
+        "id": "engine",
+        "kind": "composite",
+        "mandate": { "outcome": "Build and expose the deterministic checksum process." },
+        "contracts": [{ "id": "checksum-process", "name": "ChecksumProcess", "operations": [{ "name": "checksum", "signature": "checksum(bytes): string", "parameters": [{ "name": "bytes", "type": "bytes" }], "returns": "string" }] }],
+        "acceptance": [{ "id": "engine-public", "name": "Installed process computes the checksum", "covers": ["req-digest"], "steps": [{ "id": "engine-checksum", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": "a430d84680aabd0b" } }] }],
+        "capabilityRefs": [{ "id": "process-contract", "version": "1.0.0", "config": { "protocol": "base64-stdin-json-stdout", "timeoutMs": 2000 } }],
+        "children": [
+          {
+            "id": "checksum-core",
+            "kind": "leaf",
+            "mandate": { "outcome": "Compute a deterministic FNV-1a 64-bit checksum." },
+            "contracts": [{ "id": "checksum-core-api", "name": "ChecksumCoreApi", "operations": [{ "name": "checksum", "signature": "checksum(bytes): string", "parameters": [{ "name": "bytes", "type": "bytes" }], "returns": "string" }] }],
+            "acceptance": [{ "id": "core-acceptance", "name": "Core checksum is deterministic", "covers": ["req-digest"], "steps": [{ "id": "core-checksum", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": "a430d84680aabd0b" } }] }],
+            "capabilityRefs": [{ "id": "rust-library", "version": "1.0.0", "config": { "crateName": "checksum-core", "edition": "2021" } }],
+            "implementation": {
+              "primaryTargetId": "core-source",
+              "targets": [
+                { "targetId": "core-source", "path": "engine/checksum-core/src/lib.rs", "mediaType": "text/x-rust", "role": "source" },
+                { "targetId": "core-metadata", "path": "engine/checksum-core/Cargo.toml", "mediaType": "application/toml", "role": "metadata" },
+                { "targetId": "core-lock", "path": "engine/checksum-core/Cargo.lock", "mediaType": "application/toml", "role": "lockfile" }
+              ]
+            }
+          },
+          {
+            "id": "checksum-cli",
+            "kind": "leaf",
+            "mandate": { "outcome": "Expose the checksum as a strict base64-stdin process contract." },
+            "contracts": [{ "id": "checksum-cli-api", "name": "ChecksumCliApi", "operations": [{ "name": "checksum", "signature": "checksum(bytes): string", "parameters": [{ "name": "bytes", "type": "bytes" }], "returns": "string" }, { "name": "invalidInput", "signature": "invalidInput(value): error", "parameters": [{ "name": "value", "type": "string" }], "returns": "error" }] }],
+            "acceptance": [
+              { "id": "cli-acceptance", "name": "CLI returns the core checksum", "covers": ["req-digest"], "steps": [{ "id": "cli-checksum", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": "a430d84680aabd0b" } }] },
+              { "id": "cli-malformed", "name": "CLI rejects malformed base64", "covers": ["req-malformed"], "steps": [{ "id": "cli-invalid", "operation": "invalidInput", "arguments": ["!!!"], "expect": { "kind": "error", "errorType": "INVALID_BASE64" } }] }
+            ],
+            "capabilityRefs": [{ "id": "rust-binary", "version": "1.0.0", "config": { "crateName": "checksum-cli", "binaryName": "checksum-cli", "edition": "2021" } }],
+            "implementation": {
+              "primaryTargetId": "cli-source",
+              "targets": [
+                { "targetId": "cli-source", "path": "engine/checksum-cli/src/main.rs", "mediaType": "text/x-rust", "role": "entrypoint" },
+                { "targetId": "cli-metadata", "path": "engine/checksum-cli/Cargo.toml", "mediaType": "application/toml", "role": "metadata" },
+                { "targetId": "cli-lock", "path": "engine/checksum-cli/Cargo.lock", "mediaType": "application/toml", "role": "lockfile" }
+              ]
+            }
+          }
+        ],
+        "dependencies": [{ "provider": "checksum-core", "consumer": "checksum-cli", "contractId": "checksum-core-api" }],
+        "integration": { "scenarios": [{ "id": "engine-integration", "name": "The binary exposes the accepted core behavior", "covers": ["req-digest", "req-malformed"], "steps": [{ "id": "engine-valid", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": "a430d84680aabd0b" } }] }], "capabilityRefs": [{ "id": "process-contract", "version": "1.0.0", "config": { "protocol": "base64-stdin-json-stdout", "timeoutMs": 2000 } }] },
+        "deliverables": [{ "deliverableId": "checksum-binary", "kind": "binary", "capabilityRef": { "id": "rust-binary", "version": "1.0.0", "config": { "crateName": "checksum-cli", "binaryName": "checksum-cli", "edition": "2021" } }, "required": true, "output": { "artifactId": "checksum-cli", "mediaType": "application/octet-stream", "maxBytes": 8388608 } }],
+        "allocations": [{ "requirementId": "req-digest", "targets": [{ "node": "checksum-core", "responsibility": "compute" }, { "node": "checksum-cli", "responsibility": "expose" }], "integrationScenarioIds": ["engine-integration"] }, { "requirementId": "req-malformed", "targets": [{ "node": "checksum-cli", "responsibility": "reject malformed input" }], "integrationScenarioIds": ["engine-integration"] }]
+      },
+      {
+        "id": "gateway",
+        "kind": "composite",
+        "mandate": { "outcome": "Expose the checksum process through a bounded HTTP API." },
+        "contracts": [{ "id": "checksum-http", "name": "ChecksumHttp", "operations": [{ "name": "checksum", "signature": "checksum(bytes): ChecksumResponse", "parameters": [{ "name": "bytes", "type": "bytes" }], "returns": "ChecksumResponse" }] }],
+        "acceptance": [{ "id": "gateway-public", "name": "HTTP API returns the process checksum", "covers": ["req-digest", "req-restart"], "steps": [{ "id": "gateway-checksum", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": { "digest": "a430d84680aabd0b" } } }] }],
+        "capabilityRefs": [{ "id": "http-contract", "version": "1.0.0", "config": { "healthRoute": "/health", "timeoutMs": 2000 } }],
+        "children": [
+          {
+            "id": "protocol",
+            "kind": "leaf",
+            "mandate": { "outcome": "Define the checksum wire protocol." },
+            "contracts": [{ "id": "protocol-api", "name": "ProtocolApi", "operations": [{ "name": "encodeRequest", "signature": "encodeRequest(bytes): Request", "parameters": [{ "name": "bytes", "type": "bytes" }], "returns": "Request" }] }],
+            "acceptance": [{ "id": "protocol-acceptance", "name": "Protocol encodes bytes without loss", "covers": ["req-digest"], "steps": [{ "id": "protocol-encode", "operation": "encodeRequest", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": { "contentType": "application/octet-stream", "body": "aGVsbG8=" } } }] }],
+            "capabilityRefs": [{ "id": "typescript-package", "version": "1.0.0", "config": { "packageName": "@hash-relay/protocol", "moduleType": "module", "nodeVersion": "22" } }],
+            "implementation": { "primaryTargetId": "protocol-entrypoint", "targets": [
+              { "targetId": "protocol-entrypoint", "path": "gateway/protocol/src/index.ts", "mediaType": "text/typescript", "role": "entrypoint" },
+              { "targetId": "protocol-metadata", "path": "gateway/protocol/package.json", "mediaType": "application/json", "role": "metadata" },
+              { "targetId": "protocol-lock", "path": "gateway/protocol/package-lock.json", "mediaType": "application/json", "role": "lockfile" }
+            ] }
+          },
+          {
+            "id": "server",
+            "kind": "leaf",
+            "mandate": { "outcome": "Run the loopback HTTP relay with bounded input." },
+            "contracts": [{ "id": "server-api", "name": "ServerApi", "operations": [{ "name": "health", "signature": "health(): boolean", "parameters": [], "returns": "boolean" }] }],
+            "acceptance": [{ "id": "server-acceptance", "name": "Server exposes deterministic readiness", "covers": ["req-restart"], "steps": [{ "id": "server-health", "operation": "health", "arguments": [], "expect": { "kind": "equals", "value": true } }] }],
+            "capabilityRefs": [{ "id": "node-service", "version": "1.0.0", "config": { "packageName": "@hash-relay/server", "entrypoint": "index.mjs", "healthRoute": "/health", "nodeVersion": "22" } }],
+            "implementation": { "primaryTargetId": "server-entrypoint", "targets": [
+              { "targetId": "server-entrypoint", "path": "gateway/server/src/index.mjs", "mediaType": "text/javascript", "role": "service-entrypoint" },
+              { "targetId": "server-metadata", "path": "gateway/server/package.json", "mediaType": "application/json", "role": "metadata" },
+              { "targetId": "server-lock", "path": "gateway/server/package-lock.json", "mediaType": "application/json", "role": "lockfile" }
+            ] }
+          }
+        ],
+        "dependencies": [{ "provider": "protocol", "consumer": "server", "contractId": "protocol-api" }],
+        "integration": { "scenarios": [{ "id": "gateway-integration", "name": "HTTP relay launches the Rust process and returns its digest", "covers": ["req-digest", "req-restart"], "steps": [{ "id": "gateway-http", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": { "digest": "a430d84680aabd0b" } } }] }], "capabilityRefs": [{ "id": "http-contract", "version": "1.0.0", "config": { "healthRoute": "/health", "timeoutMs": 2000 } }] },
+        "deliverables": [
+          { "deliverableId": "protocol-package", "kind": "package", "capabilityRef": { "id": "typescript-package", "version": "1.0.0", "config": { "packageName": "@hash-relay/protocol", "moduleType": "module", "nodeVersion": "22" } }, "required": true, "output": { "artifactId": "protocol", "mediaType": "application/vnd.foundry.bundle+json", "maxBytes": 1048576 } },
+          { "deliverableId": "node-service-bundle", "kind": "service", "capabilityRef": { "id": "node-service", "version": "1.0.0", "config": { "packageName": "@hash-relay/server", "entrypoint": "index.mjs", "healthRoute": "/health", "nodeVersion": "22" } }, "required": true, "output": { "artifactId": "server", "mediaType": "application/vnd.foundry.service+json", "maxBytes": 2097152 } }
+        ],
+        "allocations": [{ "requirementId": "req-digest", "targets": [{ "node": "protocol", "responsibility": "encode" }, { "node": "server", "responsibility": "relay" }], "integrationScenarioIds": ["gateway-integration"] }, { "requirementId": "req-restart", "targets": [{ "node": "server", "responsibility": "restart cleanly" }], "integrationScenarioIds": ["gateway-integration"] }]
+      },
+      {
+        "id": "distribution",
+        "kind": "composite",
+        "mandate": { "outcome": "Describe and bind all release artifacts." },
+        "contracts": [{ "id": "release", "name": "Release", "operations": [{ "name": "createManifest", "signature": "createManifest(): Manifest", "parameters": [], "returns": "Manifest" }] }],
+        "acceptance": [{ "id": "release-public", "name": "Release manifest has the declared format", "covers": ["req-package"], "steps": [{ "id": "release-format", "operation": "createManifest", "arguments": [], "expect": { "kind": "equals", "value": { "format": "hash-relay-release-v1" } } }] }],
+        "capabilityRefs": [{ "id": "artifact-bundle", "version": "1.0.0", "config": { "format": "foundry-bundle-v1" } }],
+        "children": [{
+          "id": "release-manifest",
+          "kind": "leaf",
+          "mandate": { "outcome": "Generate the deterministic release manifest." },
+          "contracts": [{ "id": "manifest-api", "name": "ManifestApi", "operations": [{ "name": "createManifest", "signature": "createManifest(): Manifest", "parameters": [], "returns": "Manifest" }] }],
+          "acceptance": [{ "id": "manifest-acceptance", "name": "Manifest format is stable", "covers": ["req-package"], "steps": [{ "id": "manifest-format", "operation": "createManifest", "arguments": [], "expect": { "kind": "equals", "value": { "format": "hash-relay-release-v1" } } }] }],
+          "capabilityRefs": [{ "id": "typescript-package", "version": "1.0.0", "config": { "packageName": "@hash-relay/release-manifest", "moduleType": "module", "nodeVersion": "22" } }],
+          "implementation": { "primaryTargetId": "manifest-entrypoint", "targets": [
+            { "targetId": "manifest-entrypoint", "path": "distribution/release-manifest/src/index.ts", "mediaType": "text/typescript", "role": "entrypoint" },
+            { "targetId": "manifest-metadata", "path": "distribution/release-manifest/package.json", "mediaType": "application/json", "role": "metadata" },
+            { "targetId": "manifest-lock", "path": "distribution/release-manifest/package-lock.json", "mediaType": "application/json", "role": "lockfile" }
+          ] }
+        }],
+        "integration": { "scenarios": [{ "id": "release-integration", "name": "Release manifest integrates", "covers": ["req-package"], "steps": [{ "id": "release-integrated-format", "operation": "createManifest", "arguments": [], "expect": { "kind": "equals", "value": { "format": "hash-relay-release-v1" } } }] }] },
+        "deliverables": [{ "deliverableId": "release-manifest", "kind": "manifest", "capabilityRef": { "id": "artifact-bundle", "version": "1.0.0", "config": { "format": "json" } }, "required": true, "output": { "artifactId": "release-manifest", "mediaType": "application/json", "maxBytes": 1048576 } }],
+        "allocations": [{ "requirementId": "req-package", "targets": [{ "node": "release-manifest", "responsibility": "bind artifact digests" }], "integrationScenarioIds": ["release-integration"] }]
+      }
+    ],
+    "dependencies": [
+      { "provider": "engine", "consumer": "gateway", "contractId": "checksum-process" },
+      { "provider": "gateway", "consumer": "distribution", "contractId": "checksum-http" }
+    ],
+    "integration": { "scenarios": [{ "id": "product-integration", "name": "Installed Rust process is reachable through the Node API", "covers": ["req-digest", "req-restart", "req-package"], "steps": [{ "id": "product-http", "operation": "checksum", "arguments": [{ "$type": "bytes", "value": "aGVsbG8=" }], "expect": { "kind": "equals", "value": { "digest": "a430d84680aabd0b" } } }] }], "capabilityRefs": [{ "id": "mixed-rust-node-product", "version": "1.0.0", "config": { "rustBinary": "checksum-cli", "nodeEntrypoint": "gateway/server", "healthRoute": "/health" } }] },
+    "deliverables": [
+      { "deliverableId": "architecture-package", "kind": "architecture", "capabilityRef": { "id": "artifact-bundle", "version": "1.0.0", "config": { "format": "json" } }, "required": true, "output": { "artifactId": "architecture", "mediaType": "application/json", "maxBytes": 1048576 } },
+      { "deliverableId": "conformance-package", "kind": "conformance", "capabilityRef": { "id": "artifact-bundle", "version": "1.0.0", "config": { "format": "json" } }, "required": true, "output": { "artifactId": "conformance", "mediaType": "application/json", "maxBytes": 1048576 } }
+    ],
+    "allocations": [
+      { "requirementId": "req-digest", "targets": [{ "node": "engine", "responsibility": "compute" }, { "node": "gateway", "responsibility": "expose" }], "integrationScenarioIds": ["product-integration"] },
+      { "requirementId": "req-malformed", "targets": [{ "node": "engine", "responsibility": "reject" }], "integrationScenarioIds": ["product-integration"] },
+      { "requirementId": "req-restart", "targets": [{ "node": "gateway", "responsibility": "restart" }], "integrationScenarioIds": ["product-integration"] },
+      { "requirementId": "req-package", "targets": [{ "node": "distribution", "responsibility": "manifest" }, { "node": "self", "responsibility": "publish" }], "integrationScenarioIds": ["product-integration"] }
+    ]
+  },
+  "stateModels": [{ "id": "foundry-product-build", "subject": "Foundry product build", "initial": "waiting_children", "states": ["waiting_children", "ready", "leased", "verifying", "integration_ready", "integrating", "green", "infrastructure_blocked"], "transitions": [{ "from": "waiting_children", "to": "ready", "event": "providers green" }, { "from": "ready", "to": "verifying", "event": "submission" }, { "from": "verifying", "to": "green", "event": "accepted" }, { "from": "integration_ready", "to": "integrating", "event": "children green" }, { "from": "integrating", "to": "green", "event": "integration accepted" }] }]
+}

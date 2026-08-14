@@ -31,13 +31,11 @@ export class StubLlm implements LlmClient {
 }
 
 /**
- * Real provider via @mariozechner/pi-ai `completeSimple` (verified against
- * packages/ai/src/stream.ts:52 + models.ts:20). Lazily imported so the stub path needs
- * no install. M5 activation = (a) make `@mariozechner/pi-ai` resolvable in pi-pool
- * (`npm install @mariozechner/pi-ai`), and
- * (b) set the provider's env key (e.g. ANTHROPIC_API_KEY) — pi-ai auto-resolves it via
- * getEnvApiKey. `getModel`/`completeSimple` are accessed with loose casts because their
- * generic types key off pi-ai's generated MODELS table, which we address at runtime.
+ * Real provider via the maintained @earendil-works/pi-ai compatibility surface.
+ * It is lazily imported so the stub path remains offline. Live activation only requires
+ * the provider's env key (e.g. ANTHROPIC_API_KEY); pi-ai resolves that key automatically.
+ * `getModel`/`completeSimple` are accessed with loose casts because their generic types key
+ * off pi-ai's generated model table, which we address at runtime.
  */
 export class PiAiLlm implements LlmClient {
   private readonly opts: { provider: string; model: string };
@@ -46,7 +44,7 @@ export class PiAiLlm implements LlmClient {
   }
   async complete(req: LlmRequest): Promise<LlmResponse> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pi = (await import("@mariozechner/pi-ai")) as any;
+    const pi = (await import("@earendil-works/pi-ai/compat")) as any;
     const model = pi.getModel(this.opts.provider, this.opts.model);
     if (!model) throw new Error(`pi-ai: unknown model ${this.opts.provider}/${this.opts.model}`);
     const res = await pi.completeSimple(

@@ -4,7 +4,9 @@
 //! per-node read-sets, and the invalidation adjacency) that the GraphReact host drives.
 
 pub mod compile;
+pub mod product_compile;
 pub mod types;
 
 pub use compile::{compile, BuildPlan, CompileError};
-pub use types::{Interface, Ir, Kind, Node, Operation, TestBundle};
+pub use product_compile::compile_product;
+pub use types::{AcceptanceScenario, AcceptanceStep, Architecture, Interface, Ir, Kind, Node, Operation, OperationParameter, ProductArchitectureV5, TestBundle};

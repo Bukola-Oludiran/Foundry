@@ -1,0 +1,12 @@
+[package]
+name = "foundry-engine"
+version.workspace = true
+edition.workspace = true
+description = "Transport-neutral Foundry compiler and durable build-state authority."
+
+[dependencies]
+foundry-ir = { path = "../foundry-ir" }
+graphreact-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

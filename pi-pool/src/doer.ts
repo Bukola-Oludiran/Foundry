@@ -37,10 +37,17 @@ export function assemblePrompt(req: BuildRequest): string {
       ? `\nThis is an integrator: compose the dependencies to satisfy the interface.` +
         (req.composition ? ` Hint: ${req.composition}` : "")
       : "";
+  const feedback =
+    req.attempt > 1 && req.feedback
+      ? `\n\nThe independent tester rejected the previous attempt.\n` +
+        `Tester feedback:\n${typeof req.feedback === "string" ? req.feedback : JSON.stringify(req.feedback, null, 2)}\n` +
+        `Repair the implementation while preserving the interface contract.\n\n`
+      : "";
   return (
     `Implement the file \`${req.write_target}\` in ${req.language}.\n\n` +
     `Provide this interface:\n${ops}\n\n` +
     `Dependencies (import EXACTLY by these names; do not redefine them):\n${deps}\n${integrator}\n\n` +
+    feedback +
     `Respond with ONLY the ${req.language} code, in a single fenced \`\`\`${req.language} block.`
   );
 }

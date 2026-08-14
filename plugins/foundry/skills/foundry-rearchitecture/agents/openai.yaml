@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundry Rearchitecture"
+  short_description: "Propose governed subtree replacements"
+  default_prompt: "Use $foundry-rearchitecture to repair this failed Foundry subtree."

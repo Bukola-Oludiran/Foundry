@@ -5,6 +5,11 @@
   "type": "module",
   "description": "Foundry data-plane worker pool: /build (doer, pi) + /test (tester, deterministic → Piston).",
   "scripts": {
-    "validate:runner-gen": "node scripts/validate-runner-gen.ts"
+    "validate:runner-gen": "node scripts/validate-runner-gen.ts",
+    "validate:feedback": "node scripts/validate-feedback.ts",
+    "validate:m3": "node scripts/validate-m3.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.83.0"
   }
 }

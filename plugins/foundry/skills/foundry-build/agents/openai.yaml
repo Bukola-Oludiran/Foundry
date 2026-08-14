@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundry Build"
+  short_description: "Implement and verify ready Foundry nodes"
+  default_prompt: "Use $foundry-build to implement the ready work in this Foundry build."

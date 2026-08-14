@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundry Architect"
+  short_description: "Create and review governed architectures"
+  default_prompt: "Use $foundry-architect to architect this specification with Foundry."

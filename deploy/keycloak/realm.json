@@ -1,0 +1,41 @@
+{
+  "realm": "foundry-test",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 300,
+  "clients": [
+    {
+      "clientId": "foundry-test-client",
+      "name": "Foundry deterministic integration client",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "foundry-test-secret",
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "defaultClientScopes": ["openid", "profile", "foundry:read", "foundry:architect", "foundry:build", "foundry:activate", "foundry:publish", "foundry:admin"],
+      "protocolMappers": [
+        { "name": "foundry-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "consentRequired": false, "config": { "included.custom.audience": "http://127.0.0.1:8790/mcp", "access.token.claim": "true" } },
+        { "name": "tenant-claim", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-attribute-mapper", "consentRequired": false, "config": { "user.attribute": "tenant_id", "claim.name": "tenant_id", "jsonType.label": "String", "access.token.claim": "true" } }
+      ]
+    }
+  ],
+  "clientScopes": [
+    { "name": "foundry:read", "protocol": "openid-connect" },
+    { "name": "foundry:architect", "protocol": "openid-connect" },
+    { "name": "foundry:build", "protocol": "openid-connect" },
+    { "name": "foundry:activate", "protocol": "openid-connect" },
+    { "name": "foundry:publish", "protocol": "openid-connect" },
+    { "name": "foundry:admin", "protocol": "openid-connect" }
+  ],
+  "users": [
+    {
+      "username": "foundry-user",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": { "tenant_id": ["tenant-keycloak"] },
+      "credentials": [{ "type": "password", "value": "foundry-user-test-only", "temporary": false }]
+    }
+  ]
+}

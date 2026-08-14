@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "spec": { "name": "python-pricing-engine", "language": "python" },
+  "root": "pricing-engine",
+  "requirements": [{ "id": "identity", "kind": "functional", "text": "Expose identity", "priority": "must" }],
+  "delivery": {
+    "profile": "python-library",
+    "integrationNode": "pricing-engine",
+    "runtime": { "language": "python", "versionRange": ">=3.11" },
+    "sourceRoot": ".",
+    "distributionName": "python-pricing-engine",
+    "publicModule": "pricing_engine",
+    "dependencyPolicy": "none",
+    "metadataTargetId": "metadata",
+    "readmeTargetId": "readme"
+  },
+  "nodes": [
+    {
+      "id": "catalog",
+      "kind": "leaf",
+      "owner": "pricing-engine",
+      "provides": { "name": "Catalog", "operations": [{ "name": "Catalog", "signature": "Catalog()" }] },
+      "requires": [],
+      "implementation": { "language": "python", "targets": [{ "targetId": "catalog-source", "path": "pricing_engine/catalog.py", "mediaType": "text/x-python", "role": "source" }] },
+      "acceptance": { "mandate_owner": "pricing-engine", "language": "python", "cases": [{ "name": "construct", "call": "Catalog().__class__.__name__", "expect": "Catalog", "covers": ["identity"] }] }
+    },
+    {
+      "id": "pricing-engine",
+      "kind": "integrator",
+      "owner": null,
+      "provides": { "name": "PricingEngine", "operations": [{ "name": "identity", "signature": "identity(value)" }] },
+      "requires": [{ "node": "catalog", "interface": "Catalog" }],
+      "implementation": {
+        "children": ["catalog"],
+        "primaryTargetId": "engine-source",
+        "targets": [
+          { "targetId": "engine-source", "path": "pricing_engine/pricing_engine.py", "mediaType": "text/x-python", "role": "entrypoint" },
+          { "targetId": "package-init", "path": "pricing_engine/__init__.py", "mediaType": "text/x-python", "role": "source" },
+          { "targetId": "build-backend", "path": "foundry_backend.py", "mediaType": "text/x-python", "role": "source" },
+          { "targetId": "metadata", "path": "pyproject.toml", "mediaType": "text/plain", "role": "metadata" },
+          { "targetId": "readme", "path": "README.md", "mediaType": "text/markdown", "role": "documentation" }
+        ]
+      },
+      "acceptance": { "mandate_owner": "spec", "language": "python", "cases": [{ "name": "identity", "call": "identity('ok')", "expect": "ok", "covers": ["identity"] }] }
+    }
+  ]
+}

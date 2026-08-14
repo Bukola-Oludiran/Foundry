@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "foundry": {
+      "command": "npm",
+      "args": ["--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:stdio"],
+      "env_vars": [
+        "FOUNDRY_DATA_DIR",
+        "FOUNDRY_WORKSPACE_ROOTS",
+        "FOUNDRY_ENGINE_BIN",
+        "FOUNDRY_ENGINE_IN_PROCESS",
+        "FOUNDRY_WORKER_URL",
+        "FOUNDRY_TENANT_ID",
+        "FOUNDRY_USER_ID",
+        "FOUNDRY_CLIENT_ID"
+      ]
+    }
+  }
+}

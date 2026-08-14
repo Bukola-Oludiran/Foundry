@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundry Publish"
+  short_description: "Review and publish controlled revisions"
+  default_prompt: "Use $foundry-publish to prepare and confirm this Foundry repository update."

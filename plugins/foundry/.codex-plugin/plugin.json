@@ -1,0 +1,23 @@
+{
+  "name": "foundry",
+  "version": "0.1.0",
+  "description": "Governed architecture, UML projection, implementation, verification, and repository publication through Foundry MCP.",
+  "author": {
+    "name": "Foundry"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Foundry",
+    "shortDescription": "Governed architecture and verified builds",
+    "longDescription": "Use Codex intelligence through Foundry's authoritative MCP tools, immutable architecture IR, UML and Excalidraw projections, sandboxed builds, Piston verification, and confirmed repository publication.",
+    "developerName": "Foundry",
+    "category": "Developer Tools",
+    "capabilities": ["Architecture", "Build", "UML", "Repository Write"],
+    "defaultPrompt": [
+      "Architect this specification with Foundry.",
+      "Implement the ready nodes in this Foundry build.",
+      "Review and publish this Foundry revision."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

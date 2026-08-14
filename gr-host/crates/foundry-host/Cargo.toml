@@ -8,8 +8,13 @@ description = "Foundry control-plane host: compiles an IR, runs a supervised bot
 name = "foundry-host"
 path = "src/main.rs"
 
+[[bin]]
+name = "foundry-engine-sidecar"
+path = "src/sidecar.rs"
+
 [dependencies]
 foundry-ir = { path = "../foundry-ir" }
+foundry-engine = { path = "../foundry-engine" }
 graphreact-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

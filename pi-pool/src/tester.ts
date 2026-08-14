@@ -5,14 +5,16 @@
 // the verdict is identical. Black-box: reads only the built module + its declared deps.
 
 import type { TestRequest, TestResult, Failure } from "./contract.ts";
-import { generatePythonRunner, parseVerdict } from "./runner-gen.ts";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { generatePythonRunner, generatePythonTypedRunner, parseVerdict } from "./runner-gen.ts";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, isAbsolute } from "node:path";
+import { join, isAbsolute, dirname } from "node:path";
 
 const abs = (ws: string, p: string): string => (isAbsolute(p) ? p : join(ws, p));
 const sanitize = (id: string): string => id.replace(/-/g, "_");
+const boundedTime = (req: TestRequest): number => Math.min(Math.max(req.acceptance.perf?.time_ms ?? 3000, 100), 10_000);
+const boundedMemory = (req: TestRequest): number => Math.min(Math.max(req.acceptance.perf?.mem_mb ?? 256, 16), 256) * 1_000_000;
 
 export interface TesterConfig {
   mode: "local" | "piston";
@@ -26,17 +28,17 @@ interface PFile {
 
 /** Flatten module-under-test + deps + generated runner (runner is files[0] = the main file). */
 function assembleFiles(req: TestRequest): PFile[] {
-  const moduleName = sanitize(req.node_id);
-  const runner = generatePythonRunner({
+  const moduleName = req.module_import_name ?? sanitize(req.node_id);
+  const runnerInput = {
     moduleImportName: moduleName,
     opNames: req.provides.operations.map((o) => o.name),
     cases: req.acceptance.cases,
-  });
+    scenarios: req.acceptance.scenarios,
+  };
+  const runner = req.architecture_version === 4 ? generatePythonTypedRunner(runnerInput) : generatePythonRunner(runnerInput);
   const files: PFile[] = [{ name: "__runner.py", content: runner }];
-  files.push({ name: `${moduleName}.py`, content: readFileSync(abs(req.workspace, req.write_target), "utf-8") });
-  for (const d of req.deps) {
-    files.push({ name: `${d.import_name}.py`, content: readFileSync(abs(req.workspace, d.read_path), "utf-8") });
-  }
+  if (req.repository_layout) for (const path of [...new Set(req.repository_files ?? [req.write_target, ...req.deps.map((dep) => dep.read_path)])]) { const full = abs(req.workspace, path); if (existsSync(full)) files.push({ name: path, content: readFileSync(full, "utf-8") }); }
+  else { files.push({ name: `${moduleName}.py`, content: readFileSync(abs(req.workspace, req.write_target), "utf-8") }); for (const d of req.deps) files.push({ name: `${d.import_name}.py`, content: readFileSync(abs(req.workspace, d.read_path), "utf-8") }); }
   return files;
 }
 
@@ -65,11 +67,12 @@ function toResult(nodeId: string, stdout: string, piston: TestResult["piston"]):
 function runLocal(req: TestRequest, files: PFile[]): TestResult {
   const dir = mkdtempSync(join(tmpdir(), "foundry-test-"));
   try {
-    for (const f of files) writeFileSync(join(dir, f.name), f.content);
+    for (const f of files) { const path = join(dir, f.name); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, f.content); }
+    if (req.runtime_version_range) { const version = spawnSync("python3", ["--version"], { encoding: "utf8" }).stdout.trim() || spawnSync("python3", ["--version"], { encoding: "utf8" }).stderr.trim(); if (!satisfies(version, req.runtime_version_range)) return toResult(req.node_id, "", { code: -1, signal: null, stdout: "", stderr: `RUNTIME_UNAVAILABLE: ${version} does not satisfy ${req.runtime_version_range}` }); }
     const proc = spawnSync("python3", ["__runner.py"], {
       cwd: dir,
       encoding: "utf-8",
-      timeout: (req.acceptance.perf?.time_ms ?? 3000) + 2000,
+      timeout: boundedTime(req) + 2000,
     });
     return toResult(req.node_id, proc.stdout ?? "", {
       code: proc.status ?? -1,
@@ -83,24 +86,27 @@ function runLocal(req: TestRequest, files: PFile[]): TestResult {
 }
 
 const pistonVersionCache: Record<string, string> = {};
-async function resolvePistonVersion(url: string, language: string): Promise<string> {
-  if (pistonVersionCache[language]) return pistonVersionCache[language];
+function versionTuple(value: string): number[] { return (value.match(/\d+(?:\.\d+)*/)?.[0] ?? "0").split(".").map(Number); }
+function compareVersion(a: string, b: string): number { const aa = versionTuple(a), bb = versionTuple(b); for (let i = 0; i < Math.max(aa.length, bb.length); i++) { const d = (aa[i] ?? 0) - (bb[i] ?? 0); if (d) return d; } return 0; }
+export function satisfies(version: string, range?: string): boolean { if (!range) return true; const minimum = range.match(/>=\s*([\d.]+)/)?.[1]; return minimum ? compareVersion(version, minimum) >= 0 : compareVersion(version, range.replace(/^[=~^\s]+/, "")) === 0; }
+export async function resolvePistonVersion(url: string, language: string, range?: string): Promise<string> {
+  const cacheKey = `${language}:${range ?? "*"}`; if (pistonVersionCache[cacheKey]) return pistonVersionCache[cacheKey];
   const r = await fetch(`${url}/api/v2/runtimes`);
   const runtimes = (await r.json()) as { language: string; version: string; aliases?: string[] }[];
-  const rt = runtimes.find((x) => x.language === language || (x.aliases ?? []).includes(language));
-  if (!rt) throw new Error(`Piston has no runtime for '${language}' — install via POST ${url}/api/v2/packages`);
-  pistonVersionCache[language] = rt.version;
+  const candidates = runtimes.filter((x) => (x.language === language || (x.aliases ?? []).includes(language)) && satisfies(x.version, range)).sort((a, b) => compareVersion(b.version, a.version)); const rt = candidates[0];
+  if (!rt) throw new Error(`RUNTIME_UNAVAILABLE: Piston has no '${language}' runtime satisfying '${range ?? "*"}'`);
+  pistonVersionCache[cacheKey] = rt.version;
   return rt.version;
 }
 
 async function runOnPiston(req: TestRequest, files: PFile[], url: string): Promise<TestResult> {
-  const version = await resolvePistonVersion(url, req.language);
+  const version = await resolvePistonVersion(url, req.language, req.runtime_version_range);
   const body = {
     language: req.language,
     version,
     files,
-    run_timeout: req.acceptance.perf?.time_ms ?? 3000,
-    run_memory_limit: req.acceptance.perf?.mem_mb ? req.acceptance.perf.mem_mb * 1_000_000 : -1,
+    run_timeout: boundedTime(req),
+    run_memory_limit: boundedMemory(req),
   };
   const resp = await fetch(`${url}/api/v2/execute`, {
     method: "POST",

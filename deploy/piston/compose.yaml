@@ -1,0 +1,36 @@
+name: foundry-piston
+
+services:
+  runtime-init:
+    build:
+      context: ../..
+      dockerfile: deploy/piston/Dockerfile
+    image: foundry-piston:local
+    command: ["/bin/bash", "-lc", "bash /opt/foundry/install-system-python.sh && bash /opt/foundry/install-foundry-product.sh"]
+    volumes:
+      - piston-packages:/piston/packages
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/piston/Dockerfile
+    image: foundry-piston:local
+    container_name: foundry_piston_api
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "127.0.0.1:2000:2000"
+    environment:
+      PISTON_RUN_TIMEOUT: "180000"
+      PISTON_RUN_CPU_TIME: "180000"
+      PISTON_OUTPUT_MAX_SIZE: "16777216"
+    volumes:
+      - piston-packages:/piston/packages
+    tmpfs:
+      - /tmp:exec
+    depends_on:
+      runtime-init:
+        condition: service_completed_successfully
+
+volumes:
+  piston-packages:

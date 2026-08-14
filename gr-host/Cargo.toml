@@ -3,7 +3,7 @@
 # embedding graphreact-core).
 [workspace]
 resolver = "2"
-members = ["crates/foundry-ir", "crates/foundry-host"]
+members = ["crates/foundry-ir", "crates/foundry-engine", "crates/foundry-host"]
 
 [workspace.package]
 version = "0.0.0"

@@ -1,0 +1,36 @@
+{
+  "version": 4,
+  "spec": { "name": "subscription-service", "language": "python" },
+  "root": "subscription-service",
+  "requirements": [
+    { "id": "ready", "kind": "quality", "text": "Expose migration-aware readiness", "priority": "must" },
+    { "id": "tenant-subscriptions", "kind": "functional", "text": "Persist isolated tenant subscriptions idempotently", "priority": "must" }
+  ],
+  "delivery": {
+    "profile": "python-service", "integrationNode": "subscription-service", "runtime": { "language": "python", "versionRange": ">=3.11" }, "sourceRoot": ".", "distributionName": "foundry-subscription-service", "publicModule": "subscription_service", "dependencyPolicy": "locked", "metadataTargetId": "metadata", "readmeTargetId": "readme", "lockfileTargetId": "lockfile", "serviceEntrypointTargetId": "service", "entrypoint": { "module": "subscription_service", "symbol": "run" }, "healthRoute": "/health", "persistence": { "engine": "sqlite", "schemaVersion": 1 }, "migrationOperationId": "migrate", "readinessOperationId": "readiness"
+  },
+  "nodes": [{
+    "id": "subscription-service", "kind": "integrator", "owner": null,
+    "provides": { "name": "SubscriptionService", "operations": [
+      { "name": "readiness", "signature": "GET /health", "parameters": [], "returns": "Health", "http": { "method": "GET", "path": "/health" } },
+      { "name": "migrate", "signature": "POST /admin/migrate", "parameters": [], "returns": "Migration", "http": { "method": "POST", "path": "/admin/migrate" } },
+      { "name": "create_subscription", "signature": "create(tenant,id,amount_cents,idempotency_key)", "parameters": [{"name":"tenant","type":"string"},{"name":"id","type":"string"},{"name":"amount_cents","type":"integer"},{"name":"idempotency_key","type":"string"}], "returns": "Subscription", "http": { "method": "POST", "path": "/subscriptions" } },
+      { "name": "get_subscription", "signature": "get(tenant,id)", "parameters": [{"name":"tenant","type":"string"},{"name":"id","type":"string"}], "returns": "Subscription", "http": { "method": "GET", "path": "/tenants/{tenant}/subscriptions/{id}" } }
+    ] },
+    "requires": [],
+    "implementation": { "language": "python", "primaryTargetId": "service", "targets": [
+      { "targetId": "service", "path": "subscription_service/service.py", "mediaType": "text/x-python", "role": "service-entrypoint" },
+      { "targetId": "package-init", "path": "subscription_service/__init__.py", "mediaType": "text/x-python", "role": "source" },
+      { "targetId": "backend", "path": "foundry_backend.py", "mediaType": "text/x-python", "role": "source" },
+      { "targetId": "metadata", "path": "pyproject.toml", "mediaType": "text/plain", "role": "metadata" },
+      { "targetId": "readme", "path": "README.md", "mediaType": "text/markdown", "role": "documentation" },
+      { "targetId": "lockfile", "path": "requirements.lock", "mediaType": "text/plain", "role": "lockfile" }
+    ] },
+    "acceptance": { "mandate_owner": "spec", "language": "python", "cases": [], "scenarios": [
+      { "id": "ready", "name": "service is migration-ready", "covers": ["ready"], "steps": [{ "id": "health", "operation": "readiness", "arguments": [], "expect": { "kind": "subset", "value": { "status": "ready", "schemaVersion": 1 } } }] },
+      { "id": "migrate", "name": "migration is idempotent", "covers": ["ready"], "steps": [{ "id": "migrate-once", "operation": "migrate", "arguments": [], "expect": { "kind": "equals", "value": { "schemaVersion": 1 } } }, { "id": "migrate-twice", "operation": "migrate", "arguments": [], "expect": { "kind": "equals", "value": { "schemaVersion": 1 } } }] },
+      { "id": "tenant-create-read", "name": "tenant subscription round trip", "covers": ["tenant-subscriptions"], "steps": [{ "id": "create", "operation": "create_subscription", "arguments": ["tenant-a","sub-1",1250,"key-1"], "expect": { "kind": "equals", "value": { "tenant": "tenant-a", "id": "sub-1", "amount_cents": 1250 } } }, { "id": "read", "operation": "get_subscription", "arguments": ["tenant-a","sub-1"], "expect": { "kind": "equals", "value": { "tenant": "tenant-a", "id": "sub-1", "amount_cents": 1250 } } }] },
+      { "id": "tenant-isolation", "name": "other tenant cannot read", "covers": ["tenant-subscriptions"], "steps": [{ "id": "missing", "operation": "get_subscription", "arguments": ["tenant-b","sub-1"], "expect": { "kind": "error", "errorType": "NotFound" } }] }
+    ] }
+  }]
+}

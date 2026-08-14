@@ -6,7 +6,7 @@
 
 import { createFoundryServer } from "../src/server.ts";
 import { StubLlm, type LlmRequest } from "../src/llm.ts";
-import type { BuildRequest, TestRequest, DepRef, Interface, BuildResult, TestResult } from "../src/contract.ts";
+import type { ApplyAndTestResult, BuildRequest, TestRequest, DepRef, Interface, BuildResult, TestResult } from "../src/contract.ts";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -37,7 +37,7 @@ interface IrNode {
   acceptance: TestRequest["acceptance"];
 }
 
-const ir = JSON.parse(readFileSync(IR, "utf-8")) as { nodes: IrNode[] };
+const ir = JSON.parse(readFileSync(IR, "utf-8")) as { spec: { language?: string }; nodes: IrNode[] };
 const byId = new Map(ir.nodes.map((n) => [n.id, n]));
 
 const depsOf = (node: IrNode) =>
@@ -133,6 +133,22 @@ async function main() {
       if (!ok) bad++;
       console.log(`  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${r.passed}p/${r.failed}f ${ok ? "" : "← " + JSON.stringify(r.failures[0])}`);
     }
+
+    console.log("\n-- POST /apply-and-test (MCP provider-free path) --");
+    const node = byId.get("lowercase")!;
+    const applied = await post<ApplyAndTestResult>(base, "/apply-and-test", {
+      workspace: ws,
+      node,
+      architecture: { spec: ir.spec, nodes: ir.nodes.map((n) => ({ id: n.id, implementation: { write_target: n.implementation.write_target } })) },
+      plan: {
+        import_names: Object.fromEntries(ir.nodes.map((n) => [n.id, sanitize(n.id)])),
+        write_targets: Object.fromEntries(ir.nodes.map((n) => [n.id, n.implementation.write_target])),
+        read_sets: Object.fromEntries(ir.nodes.map((n) => [n.id, depsOf(n).map((d) => d.read_path)])),
+      },
+      content: "def lower(s):\n    return s.lower()\n",
+    });
+    if (applied.verdict !== "green") bad++;
+    console.log(`  ${applied.verdict.toUpperCase()} lowercase      digest=${applied.digest.slice(0, 18)}…`);
   } finally {
     await new Promise<void>((res) => server.close(() => res()));
     rmSync(ws, { recursive: true, force: true });

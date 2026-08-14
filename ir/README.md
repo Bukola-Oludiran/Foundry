@@ -4,6 +4,22 @@ The formal artifact an **architecture role** emits and everything downstream com
 Language-neutral source of truth: [`schema.json`](schema.json) (JSON Schema 2020-12).
 Worked example: [`examples/string-utils.ir.json`](examples/string-utils.ir.json).
 
+`schema.json` remains frozen for legacy IR v2–v4. Recursive products use
+[`product-schema-v5.json`](product-schema-v5.json); they are never silently normalized into the
+legacy flat graph. In v5 the nested product tree is canonical, while compiler plans, work indexes,
+diagrams, and hierarchical evidence are deterministic projections.
+
+IR v2 adds typed requirements, critical scenarios, deployment topology, state models, research
+provenance, and renderer-neutral layout hints to the same canonical document. Legacy documents that
+omit `version` remain readable with empty defaults. IR v3 adds an explicit root-integrator
+`delivery` contract, requirement coverage references, and bounded multi-target ownership. IR v4
+replaces executable call/harness strings with ordered typed scenarios resolved against canonical
+operations. It also supports `python-library` and locked `python-service` delivery contracts. V2/v3
+remain readable and architecture-publishable; new implementation publication requires v4 plus
+Piston evidence v2, mutation policy, and reproducible assembly.
+PlantUML, SVG, PNG, and Excalidraw are projections
+from this document—not alternative architecture authorities.
+
 ## The atom is a dyad
 
 Every node is `{ doer, tester }`. The doer implements `provides`; the tester verifies it against
@@ -39,6 +55,8 @@ A node can be a dependency for multiple upstreams (DAG fan-in) while still havin
    the induced `depends_on` graph passes `topological_sort` (else `DagError::CycleDetected`).
 4. **Behavioral contracts** — `operations[].properties` and `acceptance` carry behavior, not just
    type signatures — the leaky-interface guard.
+5. **Filesystem scope** — write targets are normalized repository-relative paths and no two nodes
+   may own the same target.
 
 ## Derived by the compiler (not authored)
 

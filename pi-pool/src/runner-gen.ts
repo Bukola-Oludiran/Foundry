@@ -27,6 +27,7 @@ export interface GenInput {
   opNames: string[];
   /** Parent-owned acceptance cases (call/expect). */
   cases: { name: string; call?: string; expect?: unknown; harness?: string }[];
+  scenarios?: import("./contract.ts").TypedAcceptanceScenario[];
 }
 
 /** Prefix on the single stdout line carrying the JSON verdict. */
@@ -67,6 +68,56 @@ print("${VERDICT_SENTINEL}" + json.dumps({
     "failed": len(_failed),
     "failures": _failed,
 }, default=repr))
+raise SystemExit(0 if not _failed else 1)
+`;
+}
+
+export function generatePythonTypedRunner(input: GenInput): string {
+  const spec = Buffer.from(JSON.stringify({ operations: input.opNames, scenarios: input.scenarios ?? [] }), "utf8").toString("base64");
+  return `import base64, json
+from datetime import datetime
+from decimal import Decimal
+from ${input.moduleImportName} import ${input.opNames.join(", ")}
+_SPEC = json.loads(base64.b64decode("${spec}"))
+_OPS = {name: globals()[name] for name in _SPEC["operations"]}
+def _value(value, handles):
+    if isinstance(value, list): return [_value(item, handles) for item in value]
+    if not isinstance(value, dict): return value
+    if set(value) == {"$ref"}: return handles[value["$ref"]]
+    if set(value) == {"$type", "value"}:
+        if value["$type"] == "datetime": return datetime.fromisoformat(value["value"].replace("Z", "+00:00"))
+        if value["$type"] == "decimal": return Decimal(value["value"])
+        if value["$type"] == "bytes": return base64.b64decode(value["value"])
+        raise ValueError("unsupported typed value")
+    return {key: _value(item, handles) for key, item in value.items()}
+def _subset(expected, actual):
+    if isinstance(expected, dict): return isinstance(actual, dict) and all(key in actual and _subset(value, actual[key]) for key, value in expected.items())
+    if isinstance(expected, list): return isinstance(actual, list) and len(expected) == len(actual) and all(_subset(a, b) for a, b in zip(expected, actual))
+    return expected == actual
+_results = []
+for scenario in _SPEC["scenarios"]:
+    handles = {}; error = None
+    try:
+        for step in scenario["steps"]:
+            arguments = [_value(value, handles) for value in step["arguments"]]
+            if step.get("receiver"): arguments.insert(0, handles[step["receiver"]])
+            expectation = step.get("expect")
+            if expectation and expectation["kind"] == "error":
+                try: _OPS[step["operation"]](*arguments)
+                except Exception as caught:
+                    if type(caught).__name__ != expectation["errorType"] or expectation.get("messageIncludes", "") not in str(caught): raise AssertionError("unexpected error: " + repr(caught))
+                else: raise AssertionError("expected " + expectation["errorType"])
+                continue
+            actual = _OPS[step["operation"]](*arguments)
+            if step.get("bind"): handles[step["bind"]] = actual
+            if expectation:
+                expected = _value(expectation["value"], handles)
+                if expectation["kind"] == "equals" and actual != expected: raise AssertionError(f"expected {expected!r}, got {actual!r}")
+                if expectation["kind"] == "subset" and not _subset(expected, actual): raise AssertionError(f"{expected!r} is not a subset of {actual!r}")
+    except Exception as caught: error = repr(caught)
+    _results.append({"case": scenario["id"], "expected": "typed scenario", "actual": None, "error": error, "passed": error is None})
+_failed = [result for result in _results if not result["passed"]]
+print("${VERDICT_SENTINEL}" + json.dumps({"passed": len(_results) - len(_failed), "failed": len(_failed), "failures": _failed}, default=repr))
 raise SystemExit(0 if not _failed else 1)
 `;
 }
