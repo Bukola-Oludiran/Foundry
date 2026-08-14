@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "control": "foundry-m3-before-mcp",
+  "capturedAt": "2026-08-09T04:34:26Z",
+  "architecture": {
+    "mode": "hand-authored-control",
+    "modelProvider": null,
+    "model": null,
+    "costUsd": 0,
+    "humanLabels": "not-applicable-to-deterministic-control"
+  },
+  "artifacts": [
+    { "path": "ir/examples/string-utils.ir.json", "sha256": "acd35fe06e8bca0eab4d8e9677a034c7af84754a0393c203685579d8eed6702f" },
+    { "path": "pi-pool/fixtures/string-utils-impls.mjs", "sha256": "4070550a60bc98b7bf95b9eb6c4892f0946f098bf8ab37acadaa25061f0f4aa9" },
+    { "path": "pi-pool/fixtures/string-utils-impls-buggy.mjs", "sha256": "fad2ed28433ef9cdccb0be54fff60ae87cfcd810f91f9af2614ca37b35b3d068" },
+    { "path": "pi-pool/fixtures/string-utils-impls-flaky.mjs", "sha256": "088887dc8b017c5be13fe08a02a5f71c65cf79a6a4820ad91ceca092237f0261" },
+    { "path": "docs/M4-authority.md", "sha256": "51c85ad9505f9383f9b11a6668196afb1df70c60fc6a6ea61cdd8f1bc4a24833" }
+  ],
+  "characterizedBehavior": {
+    "buildOrder": ["hyphenate", "lowercase", "trim", "string-utils"],
+    "retryBudget": 3,
+    "sandbox": "macOS Seatbelt",
+    "oracle": "local deterministic runner; Piston is the external gate",
+    "scopedRebuild": "target plus transitive dependency consumers",
+    "legacyProviderDefault": "disabled"
+  },
+  "toolchain": {
+    "node": "v25.8.1",
+    "rustc": "1.95.0",
+    "git": "2.53.0"
+  },
+  "verification": {
+    "npmTest": "pass",
+    "cargoWorkspaceTest": "pass",
+    "pistonExternal": "pass",
+    "pistonValidatedAt": "2026-08-09T05:05:52Z",
+    "pistonEndpoint": "http://127.0.0.1:2000",
+    "pistonRuntime": "python 3.7.3",
+    "pistonResult": "M3 validated: supervised ownership, message gating, feedback repair, and parked red failure"
+  }
+}

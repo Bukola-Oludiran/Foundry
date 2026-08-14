@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "profile": "python-service",
+  "fixture": "fixtures/python-subscription-service",
+  "mode": "shadow",
+  "maxMutants": 24,
+  "runs": [
+    { "generated": 24, "killed": 24, "survived": 0, "score": 1.0 },
+    { "generated": 24, "killed": 24, "survived": 0, "score": 1.0 }
+  ],
+  "livePiston": { "generated": 24, "killed": 24, "survived": 0, "score": 1.0, "runtime": "python:3.11.2" },
+  "classesObserved": ["boolean", "boolop", "compare", "condition", "transaction-call", "tuple-element"],
+  "manualClassification": { "equivalentSurvivors": 0, "nonEquivalentSurvivors": 0, "falsePositiveRate": 0.0 },
+  "promotionThreshold": { "minimumScore": 0.8, "maximumEquivalentMutantFalsePositiveRate": 0.05 },
+  "notes": "The frozen subscription benchmark killed every bounded mutant in two deterministic local-control runs and one live Piston run. Shadow remains the deployment default until the held-out controls are manually classified."
+}

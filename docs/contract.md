@@ -1,4 +1,7 @@
-# Contract: GR-host ↔ pi-pool ↔ Piston
+# Contract: MCP façade ↔ Rust engine ↔ pi-pool ↔ Piston
+
+The public MCP server never forwards its public payloads directly. It resolves opaque project,
+workspace, node, and lease identifiers into the internal contracts documented here.
 
 The control plane (GR host, Rust) drives the data plane (pi workers, Node/TS) over HTTP. The pi-pool
 in turn drives **Piston** as the executable oracle.
@@ -9,12 +12,15 @@ All request bodies are keyed off a single **IR node** (see `../ir/schema.json`).
 
 ```
 GR host (Rust)                pi-pool (Node/TS)                 Piston (Docker :2000)
-  doer node  ──POST /build──▶  pi-agent-core loop  ──writes──▶  workspace (sandboxed)
+  doer node  ──POST /build──▶  provider completion ──writes──▶  workspace (Seatbelt-scoped)
   tester node ─POST /test───▶  runner-gen (v1: deterministic) ─POST /api/v2/execute─▶ verdict
              ◀── result ────                        ◀── run{stdout,code} ──
 ```
 
 ## POST /build  (doer — LLM agent via pi)
+
+This route is a legacy/control surface and is not used by MCP-native builds unless
+`FOUNDRY_ENABLE_LEGACY_PROVIDER=1` explicitly enables a provider.
 
 The doer implements `provides` into `write_target`, reading only its dependencies' interfaces. Runs
 under an OS sandbox scoped to **read** = `requires[].read_path` (read-only) + **write** =
@@ -82,6 +88,22 @@ Response `TestResult`:
 ```
 A failure entry: `{ "case": "collapse", "expected": "a-b", "actual": "a--b", "error": null }`.
 
+## POST /apply-and-test (MCP-native)
+
+The MCP façade resolves a lease to the complete bounded set of compiler-owned target IDs. The
+worker copies accepted state into a private attempt overlay, applies content with network disabled,
+and constructs the deterministic typed test. Only `accepted_green` is atomically promoted. An
+`authored_red` attempt, worker/Piston `infrastructure_error`, `contract_weak` mutation result, or
+`cancelled` operation leaves accepted source unchanged. Stable v4 submission IDs make lost-response
+retries idempotent. This route has no model-provider call.
+
+Production evidence requires Piston. Local-control execution is labeled non-publishable. After all
+nodes are green, the profile-owned assembly builds and installs the package in a clean environment,
+runs generated conformance from outside the source tree, and repeats the clean build to compare
+normalized package, test, target, and behavior digests. Python-service assembly additionally starts
+the module-and-symbol entrypoint over loopback, exercises typed HTTP scenarios, verifies SQLite
+schema/restart behavior and concurrent readiness, then proves bounded shutdown.
+
 ## pi-pool → Piston mapping (`/test`)
 
 1. Read `write_target` + every `deps[].read_path` from `workspace`.
@@ -98,12 +120,9 @@ A failure entry: `{ "case": "collapse", "expected": "a-b", "actual": "a--b", "er
 ## Piston bring-up (one-time, local)
 
 ```bash
-export PISTON_DIR=/path/to/your/piston-checkout
-docker compose -f "$PISTON_DIR/docker-compose.yml" up -d # api on :2000
-curl -s http://127.0.0.1:2000/api/v2/runtimes          # list installed
-# install the python runtime via ppman:
-curl -s -XPOST http://127.0.0.1:2000/api/v2/packages \
-  -H 'content-type: application/json' -d '{"language":"python","version":"3.*"}'
+docker compose -f deploy/piston/compose.yaml up -d
+curl -s http://127.0.0.1:2000/api/v2/runtimes
 ```
-Runs are ephemeral, isolated containers (`tmpfs /tmp:exec`, privileged). Down with `docker compose down`.
+Runs are ephemeral and isolated (`tmpfs /tmp:exec`, privileged); installed runtime metadata lives
+in a named Docker volume. See `deploy/piston/README.md`.
 ```

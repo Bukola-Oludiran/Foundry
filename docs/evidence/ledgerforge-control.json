@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-09T22:00:00Z",
+  "repository": "../python-pricing-engine-foundry",
+  "gitHead": "8f5e6c522875bbca433147226042898df249d312",
+  "architectureRevisionId": "3e42679b-8d60-489d-9b03-d97f9c6b1cb8",
+  "buildId": "3c31b61d-8f9c-4db9-bae9-a28ab5283076",
+  "irVersion": 3,
+  "root": "billing-engine",
+  "nodeCount": 16,
+  "nodeAcceptanceCaseCount": 31,
+  "mustRequirementCount": 9,
+  "manifestDigest": "sha256:f708395b57c9bbfaca184b31143ff00bcb1283769dac7ce14c81ad784fe70dac",
+  "sourceDigest": "sha256:85eaef25686ba2b812ac90b434c25b249631b9bfac52f80ba4fe9b77c08b38cc",
+  "wheelDigest": "sha256:b032d55b12ff589ea92fb48a95415eefad192b6ecd2c6ba844aed12103c5e33a",
+  "conformanceDigest": "sha256:e93e686ae6632d2c0513909b14b50c55a6d39a7c68d3b6cb4822f182e03bc747",
+  "assemblyEvidenceDigest": "sha256:6e28735f15834f70e132ae7300f53af9c82fcf4198424227d7ee350d39beb558",
+  "assembly": {
+    "passed": 12,
+    "failed": 0,
+    "runtimeRequested": ">=3.11",
+    "runtimeResolved": "3.11.2",
+    "pip": "23.0.1"
+  },
+  "nodeIds": [
+    "billing-engine", "money", "catalogue", "usage", "tiered-pricing", "discounts",
+    "tax-policies", "rating", "subscriptions", "invoice-construction", "ledger",
+    "invoicing", "idempotency", "tenant-isolation", "audit-events", "sqlite-persistence"
+  ],
+  "targetDigests": {
+    "billing-engine-source": "sha256:5948742fdf0124aaf68283c055c9725f8fc6c086b443ab8c91ce5e9b1b96ab22",
+    "build-backend": "sha256:69f91e9b7715189cce915fa06692b48e64aca6ad8e33b91a98091d33e8c7ff70",
+    "project-metadata": "sha256:60d7a71830a8f8486633688ee0b5077cee907889cdb6586b58b1620f6b16563a",
+    "project-readme": "sha256:485a568079a7d6a11d4b42a92530c6eb7a21202149862e2b85436e8c8e3b298c",
+    "typing-marker": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "money": "sha256:d546999ae5d06e820b23a413d7c92ea15edfefdf4640acba3334706cac3b60d5",
+    "catalogue": "sha256:c576cfab182736820398d112a656504ebcb7074e7b34260332ec72fdb0d31bb7",
+    "usage": "sha256:2e1fc50dc1763b03ef93ab13c7e0dbe95fc0f1a7f5d5f5d0f0457c0b7195f47d",
+    "tiered-pricing": "sha256:f1caa9bdd81f33574a13c78394762deaf90d3e5ef0080a8c182ae066adc857f0",
+    "discounts": "sha256:c3469fe8321600dab5e8cc9f65bfc8177b4a58de54c6ef05a2722810ac4bbcbc",
+    "tax-policies": "sha256:5604386c85abaadd4264bf9b16dbd6c4fd6a881ad9f05e27915763efc8ef022b",
+    "rating-source": "sha256:6a75e6d7d467fc530b27af5daffbf3b8a418a960707dbfd61bda837eafc96e5d",
+    "package-root-export": "sha256:c0d36b480aaab4d6954539a38b75e27bfbe11c2c10b6ba0e000738a6a571fcda",
+    "subscriptions": "sha256:07630b2f83886ff16d3c27fe10b225a7dd4bbce6b9a8c156880a26dc5e187ab5",
+    "invoice-construction": "sha256:0e4c4806b423196e7f96dfc3b2ee21d9db33116c902fc2a95c02ea5f76ec185f",
+    "ledger": "sha256:53193197ad8db20d9b7c75b9e84c96ba48a83f89160b10e0deac2aa11cee9bd4",
+    "invoicing": "sha256:499a6120710f396fe5932c5344f1935d186a9c9201a2d0e05788858a1a000413",
+    "idempotency": "sha256:044ec0cd604e0806d5fc36706625a60a1bc3ca6cc9267f480212b81ed9faebe1",
+    "tenant-isolation": "sha256:82e4824441271e4c3bfea7a775f6ec1a78079ac74b04011d1fc4dba10331ab66",
+    "audit-events": "sha256:1adea271fa314064e4365b2891acc909633fc48703111090c31ddb13b48f0aaa",
+    "sqlite-persistence": "sha256:d5abb1b996778c749a57a736e6a593964f4ed7a9ae4794351cb6340073a63275"
+  },
+  "publishedArtifactDigests": {
+    "architecture/foundry.ir.json": "sha256:505ba7b93ad4a70fb2a08b844eb91ae2a93c85880daa5f93a4f5a6cedcd058f1",
+    "architecture/manifest.json": "sha256:3e6fc083838777a8e73ece8f6220f695073b61da8a46b202c5c6fff3776c88d0",
+    "architecture/conformance.json": "sha256:6e28735f15834f70e132ae7300f53af9c82fcf4198424227d7ee350d39beb558",
+    "tests/foundry/test_acceptance.py": "sha256:e93e686ae6632d2c0513909b14b50c55a6d39a7c68d3b6cb4822f182e03bc747",
+    "dist/ledgerforge-0.1.0-py3-none-any.whl": "sha256:b032d55b12ff589ea92fb48a95415eefad192b6ecd2c6ba844aed12103c5e33a"
+  },
+  "observedWorkerFailure": {
+    "code": "WORKER_UNAVAILABLE",
+    "rejectedSubmissions": 6,
+    "committedEffects": 0
+  },
+  "independentVerification": {
+    "cleanWheelInstall": true,
+    "externalDirectoryImport": true,
+    "publicExports": 33,
+    "rootScenariosPassed": 2
+  }
+}
