@@ -54,11 +54,13 @@ Status: in progress; strict request and bounded proposal repair are implemented.
 
 ## M5 — genuine scoped rearchitecture
 
-Status: planned.
+Status: in progress; the versioned boundary and structural-diff validator are implemented.
 
-- Versioned subtree replacement with a stable boundary interface.
-- Structural scope checks and affected-closure rebuild.
-- Promote only a fully green proposed IR revision.
+- Implemented: accepted-revision digest binding, explicit target/reason/failure/boundary request,
+  full proposed-IR compilation, stable target interface and parent mandate checks, out-of-scope
+  byte-structural equality, affected consumer closure, and a persisted JSON structural diff.
+- Remaining: have the architecture worker produce revision proposals, stage them in fresh Git
+  worktrees, rebuild the affected closure, and atomically promote only a green revision.
 
 ## M6 — Git review delivery
 

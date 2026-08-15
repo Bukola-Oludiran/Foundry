@@ -323,6 +323,64 @@ fn main() {
         println!("valid architecture written to {output}");
         return;
     }
+    if args.get(1).is_some_and(|value| value == "rearchitect") {
+        let required = |flag: &str| {
+            arg(&args, flag).unwrap_or_else(|| {
+                eprintln!(
+                    "usage: foundry-host rearchitect --ir <accepted> --proposal <file> --node <id> --reason <text> --output <diff>"
+                );
+                std::process::exit(2);
+            })
+        };
+        let accepted_path = required("--ir");
+        let proposal_path = required("--proposal");
+        let target_node = required("--node");
+        let reason = required("--reason");
+        let output = required("--output");
+        let read_ir = |path: &str| -> Ir {
+            let raw = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                eprintln!("read {path}: {error}");
+                std::process::exit(1);
+            });
+            serde_json::from_str(&raw).unwrap_or_else(|error| {
+                eprintln!("parse {path}: {error}");
+                std::process::exit(1);
+            })
+        };
+        let accepted = read_ir(&accepted_path);
+        let proposed = read_ir(&proposal_path);
+        let Some(target) = accepted.nodes.iter().find(|node| node.id == target_node) else {
+            eprintln!("unknown revision target `{target_node}`");
+            std::process::exit(1);
+        };
+        let request = foundry_ir::ArchitectureRevisionRequest {
+            revision_version: 1,
+            accepted_ir_revision: foundry_ir::ir_digest(&accepted),
+            target_node,
+            reason,
+            failure_history: Vec::new(),
+            boundary_interface: target.provides.clone(),
+        };
+        let diff = foundry_ir::validate_revision(&accepted, &proposed, &request).unwrap_or_else(
+            |errors| {
+                errors.iter().for_each(|error| eprintln!("- {error}"));
+                std::process::exit(1);
+            },
+        );
+        std::fs::write(
+            &output,
+            serde_json::to_vec_pretty(&diff).expect("diff serialization cannot fail"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("write {output}: {error}");
+            std::process::exit(1);
+        });
+        println!(
+            "valid scoped revision: rebuild {}",
+            diff.rebuilt_nodes.join(" → ")
+        );
+        return;
+    }
     if args.get(1).is_some_and(|value| value == "cancel") {
         let Some(run_id) = arg(&args, "--run") else {
             eprintln!("usage: foundry-host cancel --run <id> --durability-dir <dir>");

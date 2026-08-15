@@ -64,6 +64,11 @@ The first control-plane commands are available directly from the host binary:
 cargo run --manifest-path gr-host/Cargo.toml -- validate --ir ir/examples/string-utils.ir.json
 cargo run --manifest-path gr-host/Cargo.toml -- architect \
   --spec product.md --output proposed.ir.json --repo . --base HEAD
+cargo run --manifest-path gr-host/Cargo.toml -- build \
+  --ir ir/examples/string-utils.ir.json --dry-run
+cargo run --manifest-path gr-host/Cargo.toml -- rearchitect \
+  --ir accepted.ir.json --proposal proposed.ir.json --node failing-node \
+  --reason "acceptance failures exhausted repair" --output structural-diff.json
 ```
 
 `architect` calls the authenticated worker, retries invalid proposals with exact Rust compiler

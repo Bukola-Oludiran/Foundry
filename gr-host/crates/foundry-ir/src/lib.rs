@@ -5,8 +5,12 @@
 
 pub mod architecture;
 pub mod compile;
+pub mod revision;
 pub mod types;
 
 pub use architecture::{validate_architecture_request, ArchitectureRequestError};
 pub use compile::{compile, BuildPlan, CompileError};
+pub use revision::{
+    ir_digest, validate_revision, ArchitectureRevisionRequest, RevisionError, StructuralDiff,
+};
 pub use types::{ArchitectureRequest, Interface, Ir, Kind, Node, Operation, TestBundle};
