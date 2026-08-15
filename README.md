@@ -58,6 +58,17 @@ make install
 make check
 ```
 
+The first control-plane commands are available directly from the host binary:
+
+```bash
+cargo run --manifest-path gr-host/Cargo.toml -- validate --ir ir/examples/string-utils.ir.json
+cargo run --manifest-path gr-host/Cargo.toml -- architect \
+  --spec product.md --output proposed.ir.json --repo . --base HEAD
+```
+
+`architect` calls the authenticated worker, retries invalid proposals with exact Rust compiler
+diagnostics, and writes the rationale beside the IR as `proposed.ir.json.rationale.md`.
+
 `make test-local` additionally exercises the available host sandbox and live worker server. See
 [`docs/M5-activation.md`](docs/M5-activation.md) for a provider-backed run.
 

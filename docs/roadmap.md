@@ -41,11 +41,16 @@ Status: in progress; the crash-recovery execution slice is implemented.
 
 ## M4 — spec-to-IR architecture
 
-Status: planned.
+Status: in progress; strict request and bounded proposal repair are implemented.
 
-- Versioned architecture request and bounded validation-repair loop.
-- Shared-node LCA placement and interface-union validation.
-- Architecture, validation, dry-run, and build control-plane commands.
+- Implemented: versioned strict `ArchitectureRequest`, authenticated architecture-worker surface,
+  separate rationale output, three-attempt schema/compiler diagnostic repair, and fail-closed output.
+- Implemented: `validate` and `architect` control-plane commands plus shared-provider lowest-common-
+  owner placement validation.
+- Implemented compiler closure: shared interfaces must equal the explicit union of operations their
+  consumers require, preventing unused/internal operations from leaking through shared contracts.
+- Remaining: repository-aware context, status command consolidation, durable architecture
+  artifacts, and an end-to-end provider-backed representative-spec suite.
 
 ## M5 — genuine scoped rearchitecture
 

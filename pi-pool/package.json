@@ -14,11 +14,12 @@
     "validate:runner-gen": "node scripts/validate-runner-gen.ts",
     "validate:sandbox": "node scripts/validate-sandbox.ts",
     "validate:build": "node scripts/validate-build.ts",
+    "validate:architect": "node scripts/validate-architect.ts",
     "validate:server": "node scripts/validate-server.ts",
     "validate:security": "node scripts/validate-worker-security.ts",
     "validate:worker-restart": "node scripts/validate-worker-restart.ts",
     "validate:oci": "node scripts/validate-oci-sandbox.ts",
-    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:doer-tools && npm run validate:security && npm run validate:worker-restart",
+    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:doer-tools && npm run validate:architect && npm run validate:security && npm run validate:worker-restart",
     "test:local": "npm test && npm run validate:sandbox && npm run validate:build && npm run validate:server"
   },
   "dependencies": {

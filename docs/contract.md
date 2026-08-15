@@ -11,6 +11,11 @@ doc is the prose spec; the Rust host mirrors these shapes.
 `FOUNDRY_WORKER_TOKEN`, never a command-line argument. Bodies default to 1 MiB, reject unknown
 fields, and are validated before model or executor work.
 
+`POST /architect` accepts a strict versioned architecture job. It returns a candidate IR and a
+separate rationale; the Rust control plane remains authoritative and feeds all serde/compiler
+diagnostics into a bounded three-attempt repair loop. Invalid proposals are never written as an
+accepted IR. `POST /cancel` cooperatively aborts a worker job by its durable effect ID.
+
 Both request types include this context in addition to their route-specific fields:
 
 ```json

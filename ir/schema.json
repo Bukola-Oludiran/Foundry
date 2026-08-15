@@ -133,7 +133,14 @@
       "additionalProperties": false,
       "properties": {
         "node": { "type": "string", "description": "Id of the providing node." },
-        "interface": { "type": "string", "description": "Name of that node's provided interface." }
+        "interface": { "type": "string", "description": "Name of that node's provided interface." },
+        "operations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Operations consumed from the interface. Omission means the complete interface.",
+          "default": []
+        }
       }
     },
     "implementation": {

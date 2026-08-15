@@ -77,6 +77,17 @@ pub enum CompileError {
         interface: String,
         provides: String,
     },
+    #[error("node `{node}` requires unknown operation `{operation}` from `{dep}`")]
+    RequiresUnknownOperation {
+        node: String,
+        dep: String,
+        operation: String,
+    },
+    #[error("shared node `{node}` exposes operations not in the consumers' required union: {operations:?}")]
+    SharedInterfaceOverexposed {
+        node: String,
+        operations: Vec<String>,
+    },
     #[error("node `{0}` authors its own acceptance (mandate_owner == self)")]
     MandateOwnerIsSelf(String),
     #[error("node `{node}` acceptance mandate_owner `{got}` must be `{expected}`")]
@@ -89,6 +100,12 @@ pub enum CompileError {
     OwnershipUnreachable(String),
     #[error("dependency graph has a cycle (sorted {sorted}/{total})")]
     Cycle { sorted: usize, total: usize },
+    #[error("shared node `{node}` must be owned by consumers' lowest common ancestor `{expected}`, not `{got}`")]
+    SharedNodeOwnerMismatch {
+        node: String,
+        expected: String,
+        got: String,
+    },
 }
 
 fn valid_node_id(id: &str) -> bool {
@@ -157,6 +174,42 @@ fn sanitize(id: &str) -> String {
     id.replace('-', "_")
 }
 
+fn ownership_ancestors<'a>(start: &'a str, by_id: &BTreeMap<&'a str, &'a Node>) -> Vec<&'a str> {
+    let mut result = Vec::new();
+    let mut current = Some(start);
+    let mut seen = BTreeSet::new();
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            break;
+        }
+        result.push(id);
+        current = by_id.get(id).and_then(|node| node.owner.as_deref());
+    }
+    result.reverse();
+    result
+}
+
+fn lowest_common_owner<'a>(
+    consumers: &[String],
+    by_id: &BTreeMap<&'a str, &'a Node>,
+) -> Option<String> {
+    let paths: Vec<_> = consumers
+        .iter()
+        .map(|consumer| ownership_ancestors(consumer, by_id))
+        .collect();
+    let first = paths.first()?;
+    first
+        .iter()
+        .enumerate()
+        .take_while(|(index, candidate)| {
+            paths
+                .iter()
+                .all(|path| path.get(*index).is_some_and(|value| value == *candidate))
+        })
+        .last()
+        .map(|(_, value)| (*value).to_owned())
+}
+
 pub fn compile(ir: &Ir) -> Result<BuildPlan, Vec<CompileError>> {
     let mut errors: Vec<CompileError> = Vec::new();
 
@@ -198,6 +251,7 @@ pub fn compile(ir: &Ir) -> Result<BuildPlan, Vec<CompileError>> {
             }
         }
     }
+
     let root_exists = by_id.contains_key(ir.root.as_str());
     if !root_exists {
         errors.push(CompileError::RootNotANode(ir.root.clone()));
@@ -359,6 +413,7 @@ pub fn compile(ir: &Ir) -> Result<BuildPlan, Vec<CompileError>> {
         .iter()
         .map(|n| (n.id.clone(), Vec::new()))
         .collect();
+    let mut required_operations: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for n in &ir.nodes {
         for r in &n.requires {
             match by_id.get(r.node.as_str()) {
@@ -374,7 +429,29 @@ pub fn compile(ir: &Ir) -> Result<BuildPlan, Vec<CompileError>> {
                         provides: dep.provides.name.clone(),
                     });
                 }
-                Some(_) => {
+                Some(dep) => {
+                    let provided: BTreeSet<_> = dep
+                        .provides
+                        .operations
+                        .iter()
+                        .map(|operation| operation.name.clone())
+                        .collect();
+                    let requested = if r.operations.is_empty() {
+                        provided.clone()
+                    } else {
+                        r.operations.iter().cloned().collect()
+                    };
+                    for operation in requested.difference(&provided) {
+                        errors.push(CompileError::RequiresUnknownOperation {
+                            node: n.id.clone(),
+                            dep: r.node.clone(),
+                            operation: operation.clone(),
+                        });
+                    }
+                    required_operations
+                        .entry(r.node.clone())
+                        .or_default()
+                        .extend(requested);
                     if let Some(consumers) = adj.get_mut(&r.node) {
                         consumers.push(n.id.clone());
                     }
@@ -382,6 +459,45 @@ pub fn compile(ir: &Ir) -> Result<BuildPlan, Vec<CompileError>> {
                         deps.push(r.node.clone());
                     }
                 }
+            }
+        }
+    }
+
+    // A provider used across ownership branches is placed directly under the consumers'
+    // lowest common owner. This keeps its implementation visible to exactly the managers
+    // responsible for every consumer, without leaking it into a sibling subtree.
+    for (provider, consumers) in &adj {
+        if consumers.len() < 2 || provider == &ir.root {
+            continue;
+        }
+        if let (Some(expected), Some(node)) = (
+            lowest_common_owner(consumers, &by_id),
+            by_id.get(provider.as_str()),
+        ) {
+            let got = node.owner.as_deref().unwrap_or("<none>");
+            if got != expected {
+                errors.push(CompileError::SharedNodeOwnerMismatch {
+                    node: provider.clone(),
+                    expected,
+                    got: got.to_owned(),
+                });
+            }
+            let provided: BTreeSet<_> = node
+                .provides
+                .operations
+                .iter()
+                .map(|operation| operation.name.clone())
+                .collect();
+            let required = required_operations
+                .get(provider)
+                .cloned()
+                .unwrap_or_default();
+            let overexposed: Vec<_> = provided.difference(&required).cloned().collect();
+            if !overexposed.is_empty() {
+                errors.push(CompileError::SharedInterfaceOverexposed {
+                    node: provider.clone(),
+                    operations: overexposed,
+                });
             }
         }
     }
@@ -514,6 +630,80 @@ mod tests {
     }
 
     #[test]
+    fn shared_provider_must_live_at_consumers_lowest_common_owner() {
+        let mut ir = load_example();
+        let lowercase_interface = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "lowercase")
+            .unwrap()
+            .provides
+            .name
+            .clone();
+        ir.nodes
+            .iter_mut()
+            .find(|node| node.id == "trim")
+            .unwrap()
+            .requires
+            .push(InterfaceRef {
+                node: "lowercase".into(),
+                interface: lowercase_interface,
+                operations: Vec::new(),
+            });
+        compile(&ir).expect("root owns the provider shared by sibling and root consumers");
+
+        ir.nodes
+            .iter_mut()
+            .find(|node| node.id == "lowercase")
+            .unwrap()
+            .owner = Some("hyphenate".into());
+        let errors = compile(&ir).expect_err("misplaced shared provider must fail");
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            CompileError::SharedNodeOwnerMismatch { node, expected, .. }
+                if node == "lowercase" && expected == "string-utils"
+        )));
+    }
+
+    #[test]
+    fn shared_interface_is_exactly_the_required_operation_union() {
+        let mut ir = load_example();
+        let lowercase = ir
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "lowercase")
+            .unwrap();
+        let mut internal = lowercase.provides.operations[0].clone();
+        internal.name = "internal-cache-key".into();
+        internal.signature = "internal_cache_key() -> string".into();
+        lowercase.provides.operations.push(internal);
+
+        for node_id in ["trim", "string-utils"] {
+            let consumer = ir.nodes.iter_mut().find(|node| node.id == node_id).unwrap();
+            if node_id == "trim" {
+                consumer.requires.push(InterfaceRef {
+                    node: "lowercase".into(),
+                    interface: "Lowercase".into(),
+                    operations: vec!["lower".into()],
+                });
+            } else {
+                consumer
+                    .requires
+                    .iter_mut()
+                    .find(|dependency| dependency.node == "lowercase")
+                    .unwrap()
+                    .operations = vec!["lower".into()];
+            }
+        }
+        let errors = compile(&ir).expect_err("unused shared operations must not leak");
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            CompileError::SharedInterfaceOverexposed { node, operations }
+                if node == "lowercase" && operations == &["internal-cache-key"]
+        )));
+    }
+
+    #[test]
     fn rejects_dependency_cycle() {
         let mut ir = load_example();
         // make a leaf depend back on the integrator → cycle.
@@ -521,6 +711,7 @@ mod tests {
         lc.requires.push(InterfaceRef {
             node: "string-utils".into(),
             interface: "StringUtils".into(),
+            operations: Vec::new(),
         });
         let errs = compile(&ir).expect_err("cycle must be rejected");
         assert!(

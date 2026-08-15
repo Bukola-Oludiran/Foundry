@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://foundry.local/schema/architecture-request-v1.json",
+  "title": "Foundry ArchitectureRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "architecture_version",
+    "product_spec",
+    "repository",
+    "base_revision",
+    "allowed_languages"
+  ],
+  "properties": {
+    "architecture_version": { "const": 1 },
+    "product_spec": { "type": "string", "minLength": 1 },
+    "repository": { "type": "string", "minLength": 1 },
+    "base_revision": { "type": "string", "minLength": 1 },
+    "allowed_languages": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["python", "typescript", "go"] }
+    },
+    "policy_constraints": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    },
+    "existing_ir": { "$ref": "https://foundry.local/schema/dyad-ir.json" }
+  }
+}

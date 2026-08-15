@@ -28,6 +28,30 @@ export interface ContentArtifact {
   media_type: string;
 }
 
+export interface ArchitectureRequest {
+  architecture_version: 1;
+  product_spec: string;
+  repository: string;
+  base_revision: string;
+  allowed_languages: ("python" | "typescript" | "go")[];
+  policy_constraints: string[];
+  existing_ir?: unknown;
+}
+
+export interface ArchitectureJobRequest {
+  protocol_version: 1;
+  job_id: string;
+  attempt: number;
+  diagnostics: string[];
+  request: ArchitectureRequest;
+}
+
+export interface ArchitectureResult {
+  proposal: unknown;
+  rationale: string;
+  usage: { input_tokens: number; output_tokens: number };
+}
+
 export interface Operation {
   name: string;
   signature: string;

@@ -2,6 +2,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   BuildRequest,
+  ArchitectureJobRequest,
   JobContext,
   ResourcePolicy,
   TestRequest,
@@ -382,6 +383,80 @@ export function validateTestRequest(
   }
   validateScopedPaths(raw as unknown as TestRequest, workspaceRoot);
   return raw as unknown as TestRequest;
+}
+
+export function validateArchitectureRequest(
+  value: unknown,
+): ArchitectureJobRequest {
+  const raw = object(value, "request");
+  exactKeys(
+    raw,
+    ["protocol_version", "job_id", "attempt", "diagnostics", "request"],
+    "request",
+  );
+  if (raw.protocol_version !== WORKER_PROTOCOL_VERSION) {
+    throw new RequestError(
+      400,
+      "UNSUPPORTED_PROTOCOL",
+      `protocol_version must be ${WORKER_PROTOCOL_VERSION}`,
+    );
+  }
+  string(raw.job_id, "job_id");
+  number(raw.attempt, "attempt", 1, 3);
+  const diagnostics = array(raw.diagnostics, "diagnostics", 256);
+  diagnostics.forEach((item, index) => string(item, `diagnostics[${index}]`));
+  const request = object(raw.request, "request.request");
+  exactKeys(
+    request,
+    [
+      "architecture_version",
+      "product_spec",
+      "repository",
+      "base_revision",
+      "allowed_languages",
+      "policy_constraints",
+      "existing_ir",
+    ],
+    "request.request",
+  );
+  if (request.architecture_version !== 1) {
+    throw new RequestError(
+      400,
+      "UNSUPPORTED_ARCHITECTURE_VERSION",
+      "architecture_version must be 1",
+    );
+  }
+  string(request.product_spec, "request.product_spec");
+  string(request.repository, "request.repository");
+  string(request.base_revision, "request.base_revision");
+  const languages = array(request.allowed_languages, "allowed_languages", 3);
+  if (languages.length === 0) {
+    throw new RequestError(
+      400,
+      "INVALID_REQUEST",
+      "allowed_languages is empty",
+    );
+  }
+  for (const language of languages) {
+    if (
+      !["python", "typescript", "go"].includes(string(language, "language"))
+    ) {
+      throw new RequestError(
+        400,
+        "INVALID_REQUEST",
+        `unsupported language ${String(language)}`,
+      );
+    }
+  }
+  const constraints = array(
+    request.policy_constraints,
+    "policy_constraints",
+    256,
+  );
+  constraints.forEach((item, index) =>
+    string(item, `policy_constraints[${index}]`),
+  );
+  return raw as unknown as ArchitectureJobRequest;
 }
 
 function ensureNoSymlink(workspace: string, relativePath: string): void {

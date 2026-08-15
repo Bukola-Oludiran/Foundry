@@ -15,6 +15,20 @@ pub struct Ir {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArchitectureRequest {
+    pub architecture_version: u32,
+    pub product_spec: String,
+    pub repository: String,
+    pub base_revision: String,
+    pub allowed_languages: Vec<String>,
+    #[serde(default)]
+    pub policy_constraints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_ir: Option<Ir>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spec {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +89,8 @@ pub struct TypeDef {
 pub struct InterfaceRef {
     pub node: String,
     pub interface: String,
+    #[serde(default)]
+    pub operations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

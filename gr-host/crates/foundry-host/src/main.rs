@@ -13,6 +13,7 @@
 //!
 //! Usage: foundry-host --ir <path> [--pi-pool URL] [--workspace DIR] [--rearchitect NODE]
 
+mod architect;
 mod durable;
 mod http;
 use http::http_post_json;
@@ -239,6 +240,10 @@ fn arg(args: &[String], flag: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|argument| argument == flag)
+}
+
 fn report(node: &str, verdict: &Verdict) -> bool {
     match verdict {
         Verdict::Green => {
@@ -254,6 +259,70 @@ fn report(node: &str, verdict: &Verdict) -> bool {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|value| value == "validate") {
+        let Some(ir_path) = arg(&args, "--ir") else {
+            eprintln!("usage: foundry-host validate --ir <file>");
+            std::process::exit(2);
+        };
+        let raw = std::fs::read_to_string(&ir_path).unwrap_or_else(|error| {
+            eprintln!("read {ir_path}: {error}");
+            std::process::exit(1);
+        });
+        let ir: Ir = serde_json::from_str(&raw).unwrap_or_else(|error| {
+            eprintln!("invalid IR JSON: {error}");
+            std::process::exit(1);
+        });
+        let plan = compile(&ir).unwrap_or_else(|errors| {
+            errors.iter().for_each(|error| eprintln!("- {error}"));
+            std::process::exit(1);
+        });
+        println!("valid IR v{}: {}", ir.ir_version, plan.order.join(" → "));
+        return;
+    }
+    if args.get(1).is_some_and(|value| value == "architect") {
+        let Some(spec_path) = arg(&args, "--spec") else {
+            eprintln!("usage: foundry-host architect --spec <file> --output <file>");
+            std::process::exit(2);
+        };
+        let Some(output) = arg(&args, "--output") else {
+            eprintln!("usage: foundry-host architect --spec <file> --output <file>");
+            std::process::exit(2);
+        };
+        let product_spec = std::fs::read_to_string(&spec_path).unwrap_or_else(|error| {
+            eprintln!("read {spec_path}: {error}");
+            std::process::exit(1);
+        });
+        let base = arg(&args, "--pi-pool").unwrap_or_else(|| "http://127.0.0.1:8787".into());
+        let token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
+            eprintln!("FOUNDRY_WORKER_TOKEN is required");
+            std::process::exit(2);
+        });
+        let request = foundry_ir::ArchitectureRequest {
+            architecture_version: 1,
+            product_spec,
+            repository: arg(&args, "--repo").unwrap_or_else(|| ".".into()),
+            base_revision: arg(&args, "--base").unwrap_or_else(|| "HEAD".into()),
+            allowed_languages: arg(&args, "--languages")
+                .unwrap_or_else(|| "python,typescript,go".into())
+                .split(',')
+                .map(str::to_owned)
+                .collect(),
+            policy_constraints: Vec::new(),
+            existing_ir: None,
+        };
+        let agent = architect::WorkerArchitectureAgent {
+            base: &base,
+            token: &token,
+        };
+        architect::architect(&agent, &request, std::path::Path::new(&output)).unwrap_or_else(
+            |error| {
+                eprintln!("architecture failed: {error}");
+                std::process::exit(1);
+            },
+        );
+        println!("valid architecture written to {output}");
+        return;
+    }
     if args.get(1).is_some_and(|value| value == "cancel") {
         let Some(run_id) = arg(&args, "--run") else {
             eprintln!("usage: foundry-host cancel --run <id> --durability-dir <dir>");
@@ -286,11 +355,6 @@ fn main() {
     let rearchitect = arg(&args, "--rearchitect");
     let durability = arg(&args, "--durability").unwrap_or_else(|| "local".to_string());
     let base_commit = arg(&args, "--base").unwrap_or_else(|| "uncommitted".to_string());
-    let worker_token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
-        eprintln!("FOUNDRY_WORKER_TOKEN is required");
-        std::process::exit(2);
-    });
-
     let raw = std::fs::read_to_string(&ir_path).unwrap_or_else(|e| {
         eprintln!("read {ir_path}: {e}");
         std::process::exit(1);
@@ -317,6 +381,17 @@ fn main() {
             eprintln!("  - {e}");
         }
         std::process::exit(1);
+    });
+    if has_flag(&args, "--dry-run") {
+        println!("Foundry dry-run: {}", ir.spec.name);
+        for (index, generation) in plan.generations.iter().enumerate() {
+            println!("  generation {index}: {}", generation.join(", "));
+        }
+        return;
+    }
+    let worker_token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
+        eprintln!("FOUNDRY_WORKER_TOKEN is required");
+        std::process::exit(2);
     });
     std::fs::create_dir_all(format!("{ws}/src")).ok();
 

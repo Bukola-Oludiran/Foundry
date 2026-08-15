@@ -25,10 +25,12 @@ import { pathToFileURL } from "node:url";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
 import { buildNode } from "./doer.ts";
+import { proposeArchitecture } from "./architect.ts";
 import { executeTest, type TesterConfig } from "./tester.ts";
 import { StubLlm, PiAiLlm, type LlmClient } from "./llm.ts";
 import {
   validateBuildRequest,
+  validateArchitectureRequest,
   validateTestRequest,
   RequestError,
 } from "./validation.ts";
@@ -312,6 +314,17 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
         cancelledJobs.add(effectId);
         activeJobs.get(effectId)?.abort();
         return send(res, 202, { effect_id: effectId, cancelled: true });
+      }
+      if (req.method === "POST" && req.url === "/architect") {
+        const raw = await readJson(req, maxBodyBytes);
+        const body = validateArchitectureRequest(raw);
+        return send(
+          res,
+          200,
+          await once("architect", body.job_id, raw, () =>
+            proposeArchitecture(body, opts.llm),
+          ),
+        );
       }
       if (req.method === "POST" && req.url === "/build") {
         const raw = await readJson(req, maxBodyBytes);
