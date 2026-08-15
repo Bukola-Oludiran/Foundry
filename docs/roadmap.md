@@ -87,6 +87,22 @@ Status: in progress; isolated worktrees, guarded commits, and draft-only publica
 - Remaining: bind Git prepare/commit/publish themselves as durable effects and add a GitHub fixture
   acceptance test.
 
+## MCP integration
+
+Status: first durable-host façade implemented; richer project authoring remains pending.
+
+- Implemented: stdio MCP tools for validate, architect, durable build, status, cancellation,
+  scoped rearchitecture, and draft-only publication.
+- Implemented: opaque configured workspace IDs, relative-path containment, symlink-escape refusal,
+  shell-free Rust host invocation, workflow resources/prompts, and a validated repo-local Codex
+  plugin.
+- Preserved: GraphReact persistence remains authoritative for build state, effects, artifacts,
+  cancellation, and publication eligibility. The alternate branch's SQLite build authority and
+  in-memory scheduler sidecar were intentionally not imported.
+- Remaining: a stable structured Rust sidecar/API, cancellation propagation from MCP transport to
+  child processes, Claude Code certification, richer architecture project resources, and the
+  separately versioned recursive product IR.
+
 ## Deferred
 
 - Hosted multi-tenancy, quotas, billing, and fleet scheduling.

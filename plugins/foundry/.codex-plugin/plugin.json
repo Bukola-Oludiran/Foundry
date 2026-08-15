@@ -1,0 +1,23 @@
+{
+  "name": "foundry",
+  "version": "0.1.0",
+  "description": "Workspace-scoped MCP access to Foundry architecture, durable builds, rearchitecture, and draft pull-request delivery.",
+  "author": {
+    "name": "Bukola-Oludiran"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Foundry",
+    "shortDescription": "Architect and run durable software builds",
+    "longDescription": "Use Foundry's GraphReact-backed durable control plane to validate architectures, execute isolated builds, govern subtree revisions, and publish human-reviewed draft pull requests.",
+    "developerName": "Bukola-Oludiran",
+    "category": "Developer Tools",
+    "capabilities": ["Architecture", "Durable Build", "Rearchitecture", "Draft PR"],
+    "defaultPrompt": [
+      "Architect this specification with Foundry.",
+      "Run this Foundry build durably.",
+      "Review and publish this successful Foundry run as a draft PR."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

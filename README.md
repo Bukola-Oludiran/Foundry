@@ -39,6 +39,8 @@ Foundry/
   ir/          the recursive dyad IR: schema, examples, docs   ← keystone (start here)
   gr-host/     Rust compiler and GraphReact control-plane host
   pi-pool/     Node/TS worker plane: build, test, LLM, and isolation
+  src/mcp/     workspace-scoped MCP façade over the durable Rust host
+  plugins/     repo-local Codex plugin and Foundry workflow skills
   docs/        contracts (GR-host ↔ pi-pool HTTP), notes
 ```
 
@@ -84,3 +86,26 @@ diagnostics, and writes the rationale beside the IR as `proposed.ir.json.rationa
 
 The current implementation status and remaining acceptance gates live in one place:
 [`docs/roadmap.md`](docs/roadmap.md).
+
+## MCP access
+
+Build the Rust host, install the locked root dependencies, and configure one or more opaque
+workspace IDs:
+
+```bash
+cargo build --manifest-path gr-host/Cargo.toml --locked
+npm ci
+export FOUNDRY_WORKSPACE_ROOTS="foundry=$(pwd)"
+npm run mcp:stdio
+```
+
+The stdio server exposes `foundry_validate`, `foundry_architect`, `foundry_build`,
+`foundry_status`, `foundry_cancel`, `foundry_rearchitect`, and `foundry_publish`. Tool calls accept
+only a configured workspace ID and relative paths. The server never exposes the absolute root as
+an MCP resource, and build/status/cancellation/publication all use the existing GraphReact local
+durability directory.
+
+The repo-local Codex plugin is in `plugins/foundry`. Its skills read their canonical workflow from
+the MCP server so tool and prompt guidance remain aligned. `FOUNDRY_HOST_BIN` may override the
+default `gr-host/target/debug/foundry-host` binary path. Provider and publishing credentials remain
+environment-only; they are never accepted as tool arguments.

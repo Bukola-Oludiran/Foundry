@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "foundry": {
+      "command": "npm",
+      "args": ["--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:stdio"],
+      "env_vars": [
+        "FOUNDRY_WORKSPACE_ROOTS",
+        "FOUNDRY_HOST_BIN",
+        "FOUNDRY_WORKER_TOKEN",
+        "PISTON_URL",
+        "GH_TOKEN",
+        "GITHUB_TOKEN"
+      ]
+    }
+  }
+}
