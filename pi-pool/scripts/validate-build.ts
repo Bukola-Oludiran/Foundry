@@ -7,15 +7,27 @@
 // Run: node Foundry/pi-pool/scripts/validate-build.ts   (macOS; no Piston/LLM needed)
 
 import { buildNode } from "../src/doer.ts";
+import { sandboxAvailability } from "../src/sandbox.ts";
 import { StubLlm, type LlmRequest } from "../src/llm.ts";
 import { generatePythonRunner, parseVerdict } from "../src/runner-gen.ts";
 import type { BuildRequest, DepRef, Interface } from "../src/contract.ts";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const IR = new URL("../../ir/examples/string-utils.ir.json", import.meta.url);
+const sandbox = sandboxAvailability();
+if (!sandbox.available) {
+  console.log(`SKIP — sandbox unavailable (${sandbox.reason})`);
+  process.exit(0);
+}
 const SCRATCH = tmpdir();
 const sanitize = (id: string): string => id.replace(/-/g, "_");
 const fence = (code: string): string => "```python\n" + code + "\n```";
@@ -25,7 +37,11 @@ interface IrNode {
   kind: "leaf" | "integrator";
   provides: Interface;
   requires?: { node: string; interface: string }[];
-  implementation: { write_target: string; composition?: string; children?: string[] };
+  implementation: {
+    write_target: string;
+    composition?: string;
+    children?: string[];
+  };
   acceptance: { cases: { name: string; call?: string; expect?: unknown }[] };
 }
 
@@ -50,7 +66,12 @@ const byId = new Map(ir.nodes.map((n) => [n.id, n]));
 function toBuildRequest(node: IrNode, workspace: string): BuildRequest {
   const requires: DepRef[] = (node.requires ?? []).map((r) => {
     const p = byId.get(r.node)!;
-    return { node: r.node, interface: p.provides, import_name: sanitize(r.node), read_path: p.implementation.write_target };
+    return {
+      node: r.node,
+      interface: p.provides,
+      import_name: sanitize(r.node),
+      read_path: p.implementation.write_target,
+    };
   });
   return {
     node_id: node.id,
@@ -74,9 +95,13 @@ function toBuildRequest(node: IrNode, workspace: string): BuildRequest {
 function topoOrder(nodes: IrNode[]): IrNode[] {
   const indeg = new Map(nodes.map((n) => [n.id, (n.requires ?? []).length]));
   const succ = new Map<string, string[]>(nodes.map((n) => [n.id, []]));
-  for (const n of nodes) for (const r of n.requires ?? []) succ.get(r.node)!.push(n.id);
+  for (const n of nodes)
+    for (const r of n.requires ?? []) succ.get(r.node)!.push(n.id);
   const order: string[] = [];
-  let frontier = nodes.filter((n) => indeg.get(n.id) === 0).map((n) => n.id).sort();
+  let frontier = nodes
+    .filter((n) => indeg.get(n.id) === 0)
+    .map((n) => n.id)
+    .sort();
   while (frontier.length) {
     const next: string[] = [];
     for (const id of frontier) {
@@ -91,18 +116,33 @@ function topoOrder(nodes: IrNode[]): IrNode[] {
   return order.map((id) => byId.get(id)!);
 }
 
-function testNode(node: IrNode, srcDir: string): { verdict: "green" | "red"; detail: string } {
+function testNode(
+  node: IrNode,
+  srcDir: string,
+): { verdict: "green" | "red"; detail: string } {
   const runner = generatePythonRunner({
     moduleImportName: sanitize(node.id),
     opNames: node.provides.operations.map((o) => o.name),
     cases: node.acceptance.cases,
   });
   writeFileSync(join(srcDir, "__runner.py"), runner);
-  const proc = spawnSync("python3", ["__runner.py"], { cwd: srcDir, encoding: "utf-8" });
+  const proc = spawnSync("python3", ["__runner.py"], {
+    cwd: srcDir,
+    encoding: "utf-8",
+  });
   const v = parseVerdict(proc.stdout ?? "");
-  if (!v) return { verdict: "red", detail: `no verdict; ${(proc.stderr ?? "").trim().slice(0, 120)}` };
+  if (!v)
+    return {
+      verdict: "red",
+      detail: `no verdict; ${(proc.stderr ?? "").trim().slice(0, 120)}`,
+    };
   const detail = v.failures.length
-    ? v.failures.map((f) => `${f.case}: exp ${JSON.stringify(f.expected)} got ${JSON.stringify(f.actual)}`).join("; ")
+    ? v.failures
+        .map(
+          (f) =>
+            `${f.case}: exp ${JSON.stringify(f.expected)} got ${JSON.stringify(f.actual)}`,
+        )
+        .join("; ")
     : "all cases pass";
   return { verdict: v.failed === 0 ? "green" : "red", detail };
 }
@@ -114,13 +154,20 @@ async function main() {
   let bad = 0;
   const order = topoOrder(ir.nodes);
 
-  console.log("== M1c: build every node bottom-up (doer stub → SANDBOXED write), then verify ==");
+  console.log(
+    "== M1c: build every node bottom-up (doer stub → SANDBOXED write), then verify ==",
+  );
   console.log(`  build order: ${order.map((n) => n.id).join(" → ")}\n`);
 
-  const stub = new StubLlm((req: LlmRequest) => IMPL[(req.meta?.node_id as string) ?? ""] ?? "```python\n# no impl\n```");
+  const stub = new StubLlm(
+    (req: LlmRequest) =>
+      IMPL[(req.meta?.node_id as string) ?? ""] ?? "```python\n# no impl\n```",
+  );
   for (const node of order) {
     const r = await buildNode(toBuildRequest(node, ws), stub);
-    console.log(`  ${r.ok ? "BUILT" : "FAIL "} ${node.id.padEnd(14)} ${r.ok ? r.summary : "← " + r.error}`);
+    console.log(
+      `  ${r.ok ? "BUILT" : "FAIL "} ${node.id.padEnd(14)} ${r.ok ? r.summary : "← " + r.error}`,
+    );
     if (!r.ok) bad++;
   }
   console.log();
@@ -128,25 +175,37 @@ async function main() {
     const t = testNode(node, srcDir);
     const ok = t.verdict === "green";
     if (!ok) bad++;
-    console.log(`  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${ok ? "" : "← " + t.detail}`);
+    console.log(
+      `  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${ok ? "" : "← " + t.detail}`,
+    );
   }
 
-  console.log("\n== induced failure: doer emits a buggy hyphenate — expect hyphenate + string-utils RED ==");
+  console.log(
+    "\n== induced failure: doer emits a buggy hyphenate — expect hyphenate + string-utils RED ==",
+  );
   const buggyStub = new StubLlm((req: LlmRequest) => {
     const id = (req.meta?.node_id as string) ?? "";
-    return id === "hyphenate" ? BUGGY_HYPHENATE : IMPL[id] ?? "```python\n# no impl\n```";
+    return id === "hyphenate"
+      ? BUGGY_HYPHENATE
+      : (IMPL[id] ?? "```python\n# no impl\n```");
   });
   await buildNode(toBuildRequest(byId.get("hyphenate")!, ws), buggyStub); // rebuild only hyphenate
   const expectRed = new Set(["hyphenate", "string-utils"]);
   for (const node of ir.nodes) {
     const t = testNode(node, srcDir);
-    const asExpected = expectRed.has(node.id) ? t.verdict === "red" : t.verdict === "green";
+    const asExpected = expectRed.has(node.id)
+      ? t.verdict === "red"
+      : t.verdict === "green";
     if (!asExpected) bad++;
-    console.log(`  ${t.verdict === "green" ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${asExpected ? "(as expected)" : "✗ UNEXPECTED"} ${t.verdict === "red" ? "← " + t.detail : ""}`);
+    console.log(
+      `  ${t.verdict === "green" ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${asExpected ? "(as expected)" : "✗ UNEXPECTED"} ${t.verdict === "red" ? "← " + t.detail : ""}`,
+    );
   }
 
   rmSync(ws, { recursive: true, force: true });
-  console.log(`\n${bad === 0 ? "✅ M1c data-plane loop validated (contract → doer → sandboxed write → tester)" : `❌ ${bad} failure(s)`}`);
+  console.log(
+    `\n${bad === 0 ? "✅ M1c data-plane loop validated (contract → doer → sandboxed write → tester)" : `❌ ${bad} failure(s)`}`,
+  );
   process.exit(bad === 0 ? 0 : 1);
 }
 main();

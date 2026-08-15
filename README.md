@@ -1,7 +1,5 @@
 # Foundry
 
-> Working name — a top-level directory, trivially renameable.
-
 An **agentic software-engineering organization** built on GraphReact.
 An *architecture role* (an LLM agent) emits a formal recursive **IR** describing a software
 architecture; that IR **deterministically compiles** to a dependency graph; each node is owned by a
@@ -39,21 +37,29 @@ oracle (Piston). When a node cannot satisfy its contract, its **manager re-archi
 ```
 Foundry/
   ir/          the recursive dyad IR: schema, examples, docs   ← keystone (start here)
-  gr-host/     Rust binary embedding graphreact-core (control plane)   [M3]
-  pi-pool/     Node/TS worker pool: /build + /test, sandboxed          [M1]
-  sandbox/     OSS OS-sandbox adapter (Seatbelt / Landlock)            [M1]
+  gr-host/     Rust compiler and GraphReact control-plane host
+  pi-pool/     Node/TS worker plane: build, test, LLM, and isolation
   docs/        contracts (GR-host ↔ pi-pool HTTP), notes
 ```
 
 ## External dependencies
 
-- **pi-ai** — the LLM provider adapter used by the worker pool.
+- **pi-ai** — the locked LLM provider adapter used by the worker pool.
 - **Piston** — the executable oracle, reachable through `PISTON_URL`.
-- **GraphReact** — the private Rust runtime used by the control-plane host. The current Cargo
-  workspace expects it as a sibling checkout; its source is intentionally not included here.
+- **GraphReact** — the Rust runtime used by the control-plane host, pinned to an exact Git revision
+  in `gr-host/Cargo.toml`.
 
-## Status
+## Development
 
-v1 = a **thin vertical loop**: one small spec → IR → deterministic DAG → bottom-up dyad build with
-Piston-gated testers → one induced failure triggers supervision-driven subtree re-architecture.
-Currently: **IR schema authored.**
+Install and run the reproducible checks from the repository root:
+
+```bash
+make install
+make check
+```
+
+`make test-local` additionally exercises the available host sandbox and live worker server. See
+[`docs/M5-activation.md`](docs/M5-activation.md) for a provider-backed run.
+
+The current implementation status and remaining acceptance gates live in one place:
+[`docs/roadmap.md`](docs/roadmap.md).

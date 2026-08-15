@@ -4,13 +4,19 @@
 //
 // Run: node Foundry/pi-pool/scripts/validate-sandbox.ts   (macOS)
 
-import { runSandboxed } from "../src/sandbox.ts";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { runSandboxed, sandboxAvailability } from "../src/sandbox.ts";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-if (process.platform !== "darwin") {
-  console.log("SKIP — sandbox validation is macOS/Seatbelt only (Linux Landlock adapter is TODO)");
+const sandbox = sandboxAvailability();
+if (!sandbox.available) {
+  console.log(`SKIP — sandbox unavailable (${sandbox.reason})`);
   process.exit(0);
 }
 
@@ -35,25 +41,52 @@ function check(desc: string, cmd: string, expectAllow: boolean): void {
   const ok = allowed === expectAllow;
   if (!ok) bad++;
   const tag = expectAllow ? "ALLOW" : "DENY ";
-  console.log(`  ${ok ? "OK " : "✗  "} [${tag}] ${desc}  →  ${allowed ? "allowed" : "denied"}${ok ? "" : "  ← UNEXPECTED"}`);
+  console.log(
+    `  ${ok ? "OK " : "✗  "} [${tag}] ${desc}  →  ${allowed ? "allowed" : "denied"}${ok ? "" : "  ← UNEXPECTED"}`,
+  );
 }
 
-console.log("== sandbox scope enforcement (write-target = src/hyphenate.py, read-set = [src/lowercase.py]) ==");
-check("write own target       (echo > hyphenate.py)", `echo 'def hyphenate(s): return s' > '${writeTarget}'`, true);
-check("write sibling code      (echo > secret.py)   ", `echo 'HACKED' > '${secret}'`, false);
-check("read declared dep       (cat lowercase.py)   ", `cat '${dep}' >/dev/null`, true);
-check("read undeclared sibling (cat secret.py)      ", `cat '${secret}' >/dev/null`, false);
+console.log(
+  "== sandbox scope enforcement (write-target = src/hyphenate.py, read-set = [src/lowercase.py]) ==",
+);
+check(
+  "write own target       (echo > hyphenate.py)",
+  `echo 'def hyphenate(s): return s' > '${writeTarget}'`,
+  true,
+);
+check(
+  "write sibling code      (echo > secret.py)   ",
+  `echo 'HACKED' > '${secret}'`,
+  false,
+);
+check(
+  "read declared dep       (cat lowercase.py)   ",
+  `cat '${dep}' >/dev/null`,
+  true,
+);
+check(
+  "read undeclared sibling (cat secret.py)      ",
+  `cat '${secret}' >/dev/null`,
+  false,
+);
 
 // prove the effects: target changed, secret untouched
 const targetContent = readFileSync(writeTarget, "utf-8").trim();
 const secretContent = readFileSync(secret, "utf-8").trim();
 const targetWritten = targetContent === "def hyphenate(s): return s";
-const secretIntact = secretContent === "SECRET = 'sibling node code the doer must not touch'";
+const secretIntact =
+  secretContent === "SECRET = 'sibling node code the doer must not touch'";
 if (!targetWritten) bad++;
 if (!secretIntact) bad++;
-console.log(`\n  ${targetWritten ? "OK " : "✗  "} write-target actually received the write`);
-console.log(`  ${secretIntact ? "OK " : "✗  "} sibling code left byte-intact (write never happened)`);
+console.log(
+  `\n  ${targetWritten ? "OK " : "✗  "} write-target actually received the write`,
+);
+console.log(
+  `  ${secretIntact ? "OK " : "✗  "} sibling code left byte-intact (write never happened)`,
+);
 
 rmSync(ws, { recursive: true, force: true });
-console.log(`\n${bad === 0 ? "✅ sandbox scope enforced" : `❌ ${bad} enforcement failure(s)`}`);
+console.log(
+  `\n${bad === 0 ? "✅ sandbox scope enforced" : `❌ ${bad} enforcement failure(s)`}`,
+);
 process.exit(bad === 0 ? 0 : 1);

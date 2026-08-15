@@ -12,7 +12,10 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const IR_PATH = new URL("../../ir/examples/string-utils.ir.json", import.meta.url);
+const IR_PATH = new URL(
+  "../../ir/examples/string-utils.ir.json",
+  import.meta.url,
+);
 const SCRATCH = tmpdir();
 
 const sanitize = (id: string): string => id.replace(/-/g, "_");
@@ -48,7 +51,15 @@ interface Node {
   acceptance: { cases: { name: string; call?: string; expect?: unknown }[] };
 }
 
-function testNode(node: Node, modules: Record<string, string>): { verdict: "green" | "red"; passed: number; failed: number; detail: string } {
+function testNode(
+  node: Node,
+  modules: Record<string, string>,
+): {
+  verdict: "green" | "red";
+  passed: number;
+  failed: number;
+  detail: string;
+} {
   const dir = mkdtempSync(join(SCRATCH, "foundry-test-"));
   try {
     for (const [name, content] of Object.entries(modules)) {
@@ -60,15 +71,33 @@ function testNode(node: Node, modules: Record<string, string>): { verdict: "gree
       cases: node.acceptance.cases,
     });
     writeFileSync(join(dir, "__runner.py"), runner);
-    const proc = spawnSync("python3", ["__runner.py"], { cwd: dir, encoding: "utf-8" });
+    const proc = spawnSync("python3", ["__runner.py"], {
+      cwd: dir,
+      encoding: "utf-8",
+    });
     const v = parseVerdict(proc.stdout ?? "");
     if (!v) {
-      return { verdict: "red", passed: 0, failed: -1, detail: `no verdict; stderr: ${(proc.stderr ?? "").trim().slice(0, 200)}` };
+      return {
+        verdict: "red",
+        passed: 0,
+        failed: -1,
+        detail: `no verdict; stderr: ${(proc.stderr ?? "").trim().slice(0, 200)}`,
+      };
     }
     const detail = v.failures.length
-      ? v.failures.map((f) => `${f.case}: expected ${JSON.stringify(f.expected)} got ${JSON.stringify(f.actual)}${f.error ? " err=" + f.error : ""}`).join("; ")
+      ? v.failures
+          .map(
+            (f) =>
+              `${f.case}: expected ${JSON.stringify(f.expected)} got ${JSON.stringify(f.actual)}${f.error ? " err=" + f.error : ""}`,
+          )
+          .join("; ")
       : "all cases pass";
-    return { verdict: v.failed === 0 ? "green" : "red", passed: v.passed, failed: v.failed, detail };
+    return {
+      verdict: v.failed === 0 ? "green" : "red",
+      passed: v.passed,
+      failed: v.failed,
+      detail,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -83,10 +112,14 @@ for (const node of ir.nodes) {
   const r = testNode(node, CORRECT);
   const ok = r.verdict === "green";
   if (!ok) failures++;
-  console.log(`  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${r.passed}p/${r.failed}f  ${ok ? "" : "← " + r.detail}`);
+  console.log(
+    `  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${r.passed}p/${r.failed}f  ${ok ? "" : "← " + r.detail}`,
+  );
 }
 
-console.log("\n== induced failure (buggy hyphenate) — expect hyphenate + string-utils RED, leaves GREEN ==");
+console.log(
+  "\n== induced failure (buggy hyphenate) — expect hyphenate + string-utils RED, leaves GREEN ==",
+);
 const broken = { ...CORRECT, hyphenate: BUGGY_HYPHENATE };
 const expectRed = new Set(["hyphenate", "string-utils"]);
 for (const node of ir.nodes) {
@@ -94,8 +127,12 @@ for (const node of ir.nodes) {
   const shouldBeRed = expectRed.has(node.id);
   const asExpected = shouldBeRed ? r.verdict === "red" : r.verdict === "green";
   if (!asExpected) failures++;
-  console.log(`  ${(r.verdict === "green" ? "GREEN" : "RED  ")} ${node.id.padEnd(14)} ${asExpected ? "(as expected)" : "✗ UNEXPECTED"}  ${r.verdict === "red" ? "← " + r.detail : ""}`);
+  console.log(
+    `  ${r.verdict === "green" ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${asExpected ? "(as expected)" : "✗ UNEXPECTED"}  ${r.verdict === "red" ? "← " + r.detail : ""}`,
+  );
 }
 
-console.log(`\n${failures === 0 ? "✅ runner-gen validated" : `❌ ${failures} unexpected outcome(s)`}`);
+console.log(
+  `\n${failures === 0 ? "✅ runner-gen validated" : `❌ ${failures} unexpected outcome(s)`}`,
+);
 process.exit(failures === 0 ? 0 : 1);

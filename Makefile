@@ -1,0 +1,26 @@
+.PHONY: install fmt fmt-check lint test test-local check
+
+install:
+	npm ci --prefix pi-pool
+
+fmt:
+	cargo fmt --manifest-path gr-host/Cargo.toml --all
+	npm run --prefix pi-pool format
+
+fmt-check:
+	cargo fmt --manifest-path gr-host/Cargo.toml --all -- --check
+	npm run --prefix pi-pool format:check
+
+lint:
+	cargo clippy --manifest-path gr-host/Cargo.toml --workspace --all-targets -- -D warnings
+	npm run --prefix pi-pool typecheck
+
+test:
+	cargo test --manifest-path gr-host/Cargo.toml --workspace
+	npm test --prefix pi-pool
+
+test-local:
+	cargo test --manifest-path gr-host/Cargo.toml --workspace
+	npm run --prefix pi-pool test:local
+
+check: fmt-check lint test

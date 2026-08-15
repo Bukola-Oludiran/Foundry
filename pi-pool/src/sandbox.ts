@@ -30,12 +30,39 @@ const real = (p: string): string => {
 };
 const esc = (p: string): string => p.replace(/"/g, '\\"');
 
+export function sandboxAvailability(): {
+  available: boolean;
+  reason: string | null;
+} {
+  if (process.platform !== "darwin") {
+    return {
+      available: false,
+      reason: "macOS Seatbelt is the only implemented backend",
+    };
+  }
+  const probe = spawnSync(
+    "sandbox-exec",
+    ["-p", "(version 1) (allow default)", "/usr/bin/true"],
+    { encoding: "utf8" },
+  );
+  if (probe.status !== 0) {
+    return {
+      available: false,
+      reason:
+        (probe.stderr ?? "").trim() || `sandbox-exec exited ${probe.status}`,
+    };
+  }
+  return { available: true, reason: null };
+}
+
 /** Generate a macOS Seatbelt (SBPL) profile for the given scope. */
 export function buildSeatbeltProfile(scope: SandboxScope): string {
   const ws = real(scope.workspace);
   const wt = real(scope.writeTarget);
   const reads = scope.readPaths.map(real);
-  const readAllows = [wt, ...reads].map((p) => `    (literal "${esc(p)}")`).join("\n");
+  const readAllows = [wt, ...reads]
+    .map((p) => `    (literal "${esc(p)}")`)
+    .join("\n");
   const net = scope.allowNetwork === false ? "\n(deny network*)" : "";
   return `(version 1)
 (allow default)
@@ -70,7 +97,9 @@ export function runSandboxed(
   opts: { cwd?: string; input?: string } = {},
 ): SpawnSyncReturns<string> {
   if (process.platform !== "darwin") {
-    throw new Error("runSandboxed: only macOS/Seatbelt implemented; Linux Landlock adapter is TODO");
+    throw new Error(
+      "runSandboxed: only macOS/Seatbelt implemented; Linux Landlock adapter is TODO",
+    );
   }
   const dir = mkdtempSync(join(tmpdir(), "foundry-sb-"));
   const profilePath = join(dir, "profile.sb");

@@ -90,7 +90,12 @@ export interface TestResult {
   passed: number;
   failed: number;
   failures: Failure[];
-  piston: { code: number; signal: string | null; stdout: string; stderr: string };
+  piston: {
+    code: number;
+    signal: string | null;
+    stdout: string;
+    stderr: string;
+  };
 }
 
 // ---------- Piston /api/v2/execute (subset we use) ----------

@@ -4,7 +4,12 @@
 //   GET  /health → { ok: true }
 // The LLM is injected: StubLlm for now (fixture-driven), pi-ai at M5.
 
-import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+  type Server,
+} from "node:http";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { buildNode } from "./doer.ts";
@@ -31,15 +36,22 @@ function send(res: ServerResponse, code: number, obj: unknown): void {
   // Set Content-Length so the response is NOT chunked (keeps the host's minimal HTTP
   // client — read-to-EOF + parse body — simple and robust).
   const s = JSON.stringify(obj);
-  res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(s) });
+  res.writeHead(code, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(s),
+  });
   res.end(s);
 }
 
-export function createFoundryServer(opts: { llm: LlmClient; tester?: TesterConfig }): Server {
+export function createFoundryServer(opts: {
+  llm: LlmClient;
+  tester?: TesterConfig;
+}): Server {
   const tester: TesterConfig = opts.tester ?? { mode: "local" };
   return createServer(async (req, res) => {
     try {
-      if (req.method === "GET" && req.url === "/health") return send(res, 200, { ok: true });
+      if (req.method === "GET" && req.url === "/health")
+        return send(res, 200, { ok: true });
       if (req.method === "POST" && req.url === "/build") {
         const body = (await readJson(req)) as BuildRequest;
         return send(res, 200, await buildNode(body, opts.llm));
@@ -57,7 +69,8 @@ export function createFoundryServer(opts: { llm: LlmClient; tester?: TesterConfi
 
 // Run directly: `node src/server.ts`. FOUNDRY_STUB_IMPLS points at a {nodeId: code} JSON
 // fixture (fenced or raw). Until a real provider is wired (M5), unmatched nodes get a stub.
-const isMain = Boolean(process.argv[1]) && import.meta.url === `file://${process.argv[1]}`;
+const isMain =
+  Boolean(process.argv[1]) && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   void (async () => {
     const fixture = process.env.FOUNDRY_STUB_IMPLS;
@@ -66,26 +79,44 @@ if (isMain) {
     let impls: Record<string, string | string[]> = {};
     if (fixture) {
       impls = fixture.endsWith(".json")
-        ? (JSON.parse(readFileSync(fixture, "utf-8")) as Record<string, string | string[]>)
-        : ((await import(pathToFileURL(fixture).href)).default as Record<string, string | string[]>);
+        ? (JSON.parse(readFileSync(fixture, "utf-8")) as Record<
+            string,
+            string | string[]
+          >)
+        : ((await import(pathToFileURL(fixture).href)).default as Record<
+            string,
+            string | string[]
+          >);
     }
     const pick = (v: string | string[] | undefined, attempt: number): string =>
-      Array.isArray(v) ? v[Math.min(attempt - 1, v.length - 1)] ?? "# none\n" : v ?? "# stub: no impl configured\n";
+      Array.isArray(v)
+        ? (v[Math.min(attempt - 1, v.length - 1)] ?? "# none\n")
+        : (v ?? "# stub: no impl configured\n");
     // Live provider when FOUNDRY_LLM_PROVIDER + FOUNDRY_LLM_MODEL are set (M5); else stub.
     const provider = process.env.FOUNDRY_LLM_PROVIDER;
     const modelId = process.env.FOUNDRY_LLM_MODEL;
     const llm: LlmClient =
       provider && modelId
         ? new PiAiLlm({ provider, model: modelId })
-        : new StubLlm((r) => pick(impls[(r.meta?.node_id as string) ?? ""], (r.meta?.attempt as number) ?? 1));
+        : new StubLlm((r) =>
+            pick(
+              impls[(r.meta?.node_id as string) ?? ""],
+              (r.meta?.attempt as number) ?? 1,
+            ),
+          );
     const llmLabel = provider && modelId ? `${provider}/${modelId}` : "stub";
     const tester: TesterConfig =
       process.env.FOUNDRY_TESTER === "piston"
-        ? { mode: "piston", pistonUrl: process.env.PISTON_URL ?? "http://127.0.0.1:2000" }
+        ? {
+            mode: "piston",
+            pistonUrl: process.env.PISTON_URL ?? "http://127.0.0.1:2000",
+          }
         : { mode: "local" };
     const port = Number(process.env.PORT ?? 8787);
     createFoundryServer({ llm, tester }).listen(port, () => {
-      console.log(`[pi-pool] listening on :${port} — LLM=${llmLabel}, tester=${tester.mode}`);
+      console.log(
+        `[pi-pool] listening on :${port} — LLM=${llmLabel}, tester=${tester.mode}`,
+      );
     });
   })();
 }

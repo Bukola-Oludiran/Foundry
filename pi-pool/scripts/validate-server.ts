@@ -5,14 +5,27 @@
 // Run: node Foundry/pi-pool/scripts/validate-server.ts   (macOS; no Piston/LLM/key)
 
 import { createFoundryServer } from "../src/server.ts";
+import { sandboxAvailability } from "../src/sandbox.ts";
 import { StubLlm, type LlmRequest } from "../src/llm.ts";
-import type { BuildRequest, TestRequest, DepRef, Interface, BuildResult, TestResult } from "../src/contract.ts";
+import type {
+  BuildRequest,
+  TestRequest,
+  DepRef,
+  Interface,
+  BuildResult,
+  TestResult,
+} from "../src/contract.ts";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 
 const IR = new URL("../../ir/examples/string-utils.ir.json", import.meta.url);
+const sandbox = sandboxAvailability();
+if (!sandbox.available) {
+  console.log(`SKIP — sandbox unavailable (${sandbox.reason})`);
+  process.exit(0);
+}
 const SCRATCH = tmpdir();
 const sanitize = (id: string): string => id.replace(/-/g, "_");
 const fence = (code: string): string => "```python\n" + code + "\n```";
@@ -33,7 +46,11 @@ interface IrNode {
   kind: "leaf" | "integrator";
   provides: Interface;
   requires?: { node: string; interface: string }[];
-  implementation: { write_target: string; composition?: string; children?: string[] };
+  implementation: {
+    write_target: string;
+    composition?: string;
+    children?: string[];
+  };
   acceptance: TestRequest["acceptance"];
 }
 
@@ -41,7 +58,10 @@ const ir = JSON.parse(readFileSync(IR, "utf-8")) as { nodes: IrNode[] };
 const byId = new Map(ir.nodes.map((n) => [n.id, n]));
 
 const depsOf = (node: IrNode) =>
-  (node.requires ?? []).map((r) => ({ import_name: sanitize(r.node), read_path: byId.get(r.node)!.implementation.write_target }));
+  (node.requires ?? []).map((r) => ({
+    import_name: sanitize(r.node),
+    read_path: byId.get(r.node)!.implementation.write_target,
+  }));
 
 function toBuild(node: IrNode, workspace: string): BuildRequest {
   const requires: DepRef[] = (node.requires ?? []).map((r) => ({
@@ -84,9 +104,13 @@ function toTest(node: IrNode, workspace: string): TestRequest {
 function topoOrder(nodes: IrNode[]): IrNode[] {
   const indeg = new Map(nodes.map((n) => [n.id, (n.requires ?? []).length]));
   const succ = new Map<string, string[]>(nodes.map((n) => [n.id, []]));
-  for (const n of nodes) for (const r of n.requires ?? []) succ.get(r.node)!.push(n.id);
+  for (const n of nodes)
+    for (const r of n.requires ?? []) succ.get(r.node)!.push(n.id);
   const order: string[] = [];
-  let frontier = nodes.filter((n) => indeg.get(n.id) === 0).map((n) => n.id).sort();
+  let frontier = nodes
+    .filter((n) => indeg.get(n.id) === 0)
+    .map((n) => n.id)
+    .sort();
   while (frontier.length) {
     const next: string[] = [];
     for (const id of frontier) {
@@ -102,14 +126,20 @@ function topoOrder(nodes: IrNode[]): IrNode[] {
 }
 
 async function post<T>(base: string, path: string, body: unknown): Promise<T> {
-  const r = await fetch(base + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(base + path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return (await r.json()) as T;
 }
 
 async function main() {
   const ws = mkdtempSync(join(SCRATCH, "foundry-srv-"));
   mkdirSync(join(ws, "src"));
-  const llm = new StubLlm((r: LlmRequest) => IMPL[(r.meta?.node_id as string) ?? ""] ?? "# none\n");
+  const llm = new StubLlm(
+    (r: LlmRequest) => IMPL[(r.meta?.node_id as string) ?? ""] ?? "# none\n",
+  );
   const server = createFoundryServer({ llm });
   await new Promise<void>((res) => server.listen(0, "127.0.0.1", res));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -117,13 +147,17 @@ async function main() {
 
   try {
     const health = await (await fetch(base + "/health")).json();
-    console.log(`== pi-pool live at ${base} (health: ${JSON.stringify(health)}) ==\n`);
+    console.log(
+      `== pi-pool live at ${base} (health: ${JSON.stringify(health)}) ==\n`,
+    );
 
     console.log("-- POST /build (bottom-up) --");
     for (const node of topoOrder(ir.nodes)) {
       const r = await post<BuildResult>(base, "/build", toBuild(node, ws));
       if (!r.ok) bad++;
-      console.log(`  ${r.ok ? "BUILT" : "FAIL "} ${node.id.padEnd(14)} ${r.ok ? r.summary : "← " + r.error}`);
+      console.log(
+        `  ${r.ok ? "BUILT" : "FAIL "} ${node.id.padEnd(14)} ${r.ok ? r.summary : "← " + r.error}`,
+      );
     }
 
     console.log("\n-- POST /test --");
@@ -131,14 +165,18 @@ async function main() {
       const r = await post<TestResult>(base, "/test", toTest(node, ws));
       const ok = r.verdict === "green";
       if (!ok) bad++;
-      console.log(`  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${r.passed}p/${r.failed}f ${ok ? "" : "← " + JSON.stringify(r.failures[0])}`);
+      console.log(
+        `  ${ok ? "GREEN" : "RED  "} ${node.id.padEnd(14)} ${r.passed}p/${r.failed}f ${ok ? "" : "← " + JSON.stringify(r.failures[0])}`,
+      );
     }
   } finally {
     await new Promise<void>((res) => server.close(() => res()));
     rmSync(ws, { recursive: true, force: true });
   }
 
-  console.log(`\n${bad === 0 ? "✅ pi-pool HTTP server validated (build + test over HTTP, green)" : `❌ ${bad} failure(s)`}`);
+  console.log(
+    `\n${bad === 0 ? "✅ pi-pool HTTP server validated (build + test over HTTP, green)" : `❌ ${bad} failure(s)`}`,
+  );
   process.exit(bad === 0 ? 0 : 1);
 }
 main();

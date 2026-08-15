@@ -4,18 +4,22 @@
   "title": "Foundry Dyad IR",
   "description": "The formal, deterministically-compilable intermediate representation an architecture role emits. A flat list of nodes carrying two overlaid graphs: an ownership TREE (via `owner`) and a dependency DAG (via `requires`). Every node is a dyad: a doer implements `provides`; an independent tester verifies it against `acceptance`, whose mandate is owned by the node's parent (never the node itself).",
   "type": "object",
-  "required": ["spec", "root", "nodes"],
+  "required": ["ir_version", "spec", "root", "nodes"],
   "additionalProperties": false,
   "properties": {
+    "ir_version": {
+      "const": 1,
+      "description": "Foundry IR wire-format version. Unsupported versions fail closed."
+    },
     "spec": {
       "type": "object",
       "required": ["name"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "language": {
-          "type": "string",
+          "enum": ["python", "typescript", "go"],
           "description": "Default implementation language for leaves that don't override it (a Piston-supported runtime, e.g. 'python', 'typescript')."
         }
       }
@@ -36,7 +40,7 @@
       "required": ["id", "kind", "owner", "provides", "acceptance"],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
         "kind": {
           "enum": ["leaf", "integrator"],
           "description": "leaf = the doer writes real code. integrator = the doer writes glue composing this node's children."
@@ -83,7 +87,7 @@
       "required": ["name", "operations"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
         "operations": {
           "type": "array",
           "minItems": 1,
@@ -109,9 +113,10 @@
       "required": ["name", "signature"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
         "signature": {
           "type": "string",
+          "minLength": 1,
           "description": "Language-neutral signature, e.g. 'slugify(s: string) -> string'."
         },
         "description": { "type": "string" },
@@ -131,21 +136,29 @@
         "interface": { "type": "string", "description": "Name of that node's provided interface." }
       }
     },
+    "implementation": {
+      "oneOf": [
+        { "$ref": "#/$defs/leafImpl" },
+        { "$ref": "#/$defs/integratorImpl" }
+      ]
+    },
     "leafImpl": {
       "type": "object",
       "required": ["language", "write_target"],
       "additionalProperties": false,
       "properties": {
         "language": {
-          "type": "string",
+          "enum": ["python", "typescript", "go"],
           "description": "A Piston-supported runtime the doer writes in (e.g. 'python', 'typescript')."
         },
         "write_target": {
           "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
           "description": "Repo-relative path/dir the doer may WRITE (the sandbox write scope). The doer's read-set is derived by the compiler = each required node's write_target, mounted read-only."
         },
         "entrypoint": {
           "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
           "description": "Optional file within write_target that exports `provides`."
         }
       }
@@ -163,6 +176,7 @@
         },
         "write_target": {
           "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
           "description": "Repo-relative path/dir for the glue/composition code the integrator's doer writes."
         },
         "composition": {
@@ -181,7 +195,7 @@
           "description": "Id of the node that OWNS this acceptance mandate (the parent), or 'spec' for the root. Integrity rule: never equal to the node's own id — the doer cannot author its own exam."
         },
         "language": {
-          "type": "string",
+          "enum": ["python", "typescript", "go"],
           "description": "Piston runtime the acceptance suite executes under."
         },
         "cases": {
@@ -211,7 +225,7 @@
       "required": ["name"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
         "call": {
           "type": "string",
           "description": "Expression exercising `provides`, e.g. \"slugify('  Hello World! ')\"."
@@ -223,7 +237,11 @@
           "type": "string",
           "description": "Optional full test-body source (for cases that need setup/state beyond call/expect)."
         }
-      }
+      },
+      "oneOf": [
+        { "required": ["call", "expect"], "not": { "required": ["harness"] } },
+        { "required": ["harness"], "not": { "required": ["call"] } }
+      ]
     }
   }
 }

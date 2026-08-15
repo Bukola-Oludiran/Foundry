@@ -20,7 +20,9 @@ export function assemblePrompt(req: BuildRequest): string {
     .map(
       (o) =>
         `  - ${o.signature}${o.description ? " — " + o.description : ""}` +
-        (o.properties && o.properties.length ? `\n    contract: ${o.properties.join("; ")}` : ""),
+        (o.properties && o.properties.length
+          ? `\n    contract: ${o.properties.join("; ")}`
+          : ""),
     )
     .join("\n");
   const deps = req.requires.length
@@ -48,12 +50,16 @@ export function assemblePrompt(req: BuildRequest): string {
 /** Pull the code out of an LLM response (first fenced block, else the whole text). */
 export function extractCode(text: string): string {
   const m = text.match(/```[a-zA-Z0-9_+-]*\n([\s\S]*?)```/);
-  return (m ? m[1] : text).trim() + "\n";
+  return (m?.[1] ?? text).trim() + "\n";
 }
 
-const abs = (workspace: string, p: string): string => (isAbsolute(p) ? p : join(workspace, p));
+const abs = (workspace: string, p: string): string =>
+  isAbsolute(p) ? p : join(workspace, p);
 
-export async function buildNode(req: BuildRequest, llm: LlmClient): Promise<BuildResult> {
+export async function buildNode(
+  req: BuildRequest,
+  llm: LlmClient,
+): Promise<BuildResult> {
   const target = abs(req.workspace, req.write_target);
   // The host/compiler owns the workspace file layout; ensure the target exists so the
   // sandboxed write (and realpath) resolve. This is host setup, not the doer writing.
@@ -74,7 +80,9 @@ export async function buildNode(req: BuildRequest, llm: LlmClient): Promise<Buil
     readPaths: req.requires.map((r) => abs(req.workspace, r.read_path)),
     writeTarget: target,
   };
-  const w = runSandboxed(scope, "/bin/sh", ["-c", `cat > "${target}"`], { input: code });
+  const w = runSandboxed(scope, "/bin/sh", ["-c", `cat > "${target}"`], {
+    input: code,
+  });
   if (w.status !== 0) {
     return {
       node_id: req.node_id,

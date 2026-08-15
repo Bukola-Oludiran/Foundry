@@ -5,6 +5,24 @@
   "type": "module",
   "description": "Foundry data-plane worker pool: /build (doer, pi) + /test (tester, deterministic → Piston).",
   "scripts": {
-    "validate:runner-gen": "node scripts/validate-runner-gen.ts"
+    "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts' 'fixtures/**/*.{js,mjs,json}' package.json tsconfig.json",
+    "format:check": "prettier --check 'src/**/*.ts' 'scripts/**/*.ts' 'fixtures/**/*.{js,mjs,json}' package.json tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "validate:ir": "node scripts/validate-ir.ts",
+    "validate:runner-gen": "node scripts/validate-runner-gen.ts",
+    "validate:sandbox": "node scripts/validate-sandbox.ts",
+    "validate:build": "node scripts/validate-build.ts",
+    "validate:server": "node scripts/validate-server.ts",
+    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen",
+    "test:local": "npm test && npm run validate:sandbox && npm run validate:build && npm run validate:server"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "prettier": "3.9.6",
+    "typescript": "7.0.2"
   }
 }

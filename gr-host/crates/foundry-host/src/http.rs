@@ -20,15 +20,23 @@ pub fn http_post_json(base: &str, path: &str, body: &Value) -> Result<Value, Str
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body_bytes.len()
     );
-    stream.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(head.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(&body_bytes).map_err(|e| e.to_string())?;
     stream.flush().ok();
 
     let mut resp = Vec::new();
     stream.read_to_end(&mut resp).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&resp);
-    let split = text.find("\r\n\r\n").ok_or_else(|| "no header/body separator".to_string())?;
+    let split = text
+        .find("\r\n\r\n")
+        .ok_or_else(|| "no header/body separator".to_string())?;
     let body_str = text[split + 4..].trim();
-    serde_json::from_str(body_str)
-        .map_err(|e| format!("parse response: {e}; raw={}", body_str.chars().take(200).collect::<String>()))
+    serde_json::from_str(body_str).map_err(|e| {
+        format!(
+            "parse response: {e}; raw={}",
+            body_str.chars().take(200).collect::<String>()
+        )
+    })
 }

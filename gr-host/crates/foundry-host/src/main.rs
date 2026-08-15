@@ -51,7 +51,11 @@ impl TelemetrySink for AuditSink {
     fn on_message_delivered(&self, ev: &MessageDelivered<'_>) {
         self.events.fetch_add(1, Ordering::Relaxed);
         if ev.message_type == "build" {
-            println!("   [telemetry] build → {:<14} ({})", ev.to, if ev.accepted { "accepted" } else { "REJECTED" });
+            println!(
+                "   [telemetry] build → {:<14} ({})",
+                ev.to,
+                if ev.accepted { "accepted" } else { "REJECTED" }
+            );
         }
     }
     fn on_node_mounted(&self, ev: &NodeMounted<'_>) {
@@ -68,7 +72,10 @@ fn build_once(job: &Job, base: &str, attempt: u32, feedback: &Value) -> Verdict 
         Err(e) => return Verdict::Error(format!("build: {e}")),
         Ok(v) => {
             if !v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                return Verdict::Red(format!("build failed: {}", v.get("error").and_then(Value::as_str).unwrap_or("?")));
+                return Verdict::Red(format!(
+                    "build failed: {}",
+                    v.get("error").and_then(Value::as_str).unwrap_or("?")
+                ));
             }
         }
     }
@@ -78,7 +85,11 @@ fn build_once(job: &Job, base: &str, attempt: u32, feedback: &Value) -> Verdict 
             if v.get("verdict").and_then(Value::as_str) == Some("green") {
                 Verdict::Green
             } else {
-                Verdict::Red(v.get("failures").map(std::string::ToString::to_string).unwrap_or_default())
+                Verdict::Red(
+                    v.get("failures")
+                        .map(std::string::ToString::to_string)
+                        .unwrap_or_default(),
+                )
             }
         }
     }
@@ -112,10 +123,18 @@ fn build_with_retry(
 
 fn build_jobs(ir: &Ir, plan: &BuildPlan, ws: &str) -> HashMap<String, Job> {
     let by_id: HashMap<&str, &Node> = ir.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let default_lang = ir.spec.language.clone().unwrap_or_else(|| "python".to_string());
+    let default_lang = ir
+        .spec
+        .language
+        .clone()
+        .unwrap_or_else(|| "python".to_string());
     let mut jobs = HashMap::new();
     for n in &ir.nodes {
-        let lang = n.implementation.language.clone().unwrap_or_else(|| default_lang.clone());
+        let lang = n
+            .implementation
+            .language
+            .clone()
+            .unwrap_or_else(|| default_lang.clone());
         let provides = serde_json::to_value(&n.provides).unwrap_or(Value::Null);
         let requires: Vec<Value> = n
             .requires
@@ -157,13 +176,21 @@ fn build_jobs(ir: &Ir, plan: &BuildPlan, ws: &str) -> HashMap<String, Job> {
             "write_target": n.implementation.write_target, "provides": provides,
             "acceptance": serde_json::to_value(&n.acceptance).unwrap_or(Value::Null), "deps": deps,
         });
-        jobs.insert(n.id.clone(), Job { build_req, test_req });
+        jobs.insert(
+            n.id.clone(),
+            Job {
+                build_req,
+                test_req,
+            },
+        );
     }
     jobs
 }
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn report(node: &str, verdict: &Verdict) -> bool {
@@ -186,8 +213,12 @@ fn main() {
         std::process::exit(2);
     };
     let base = arg(&args, "--pi-pool").unwrap_or_else(|| "http://127.0.0.1:8787".to_string());
-    let ws = arg(&args, "--workspace")
-        .unwrap_or_else(|| std::env::temp_dir().join("foundry-ws").to_string_lossy().into_owned());
+    let ws = arg(&args, "--workspace").unwrap_or_else(|| {
+        std::env::temp_dir()
+            .join("foundry-ws")
+            .to_string_lossy()
+            .into_owned()
+    });
     let rearchitect = arg(&args, "--rearchitect");
 
     let raw = std::fs::read_to_string(&ir_path).unwrap_or_else(|e| {
@@ -213,8 +244,12 @@ fn main() {
     println!("  pi-pool:      {base}");
 
     let jobs = Rc::new(build_jobs(&ir, &plan, &ws));
-    let verdicts: Rc<RefCell<HashMap<String, Verdict>>> =
-        Rc::new(RefCell::new(ir.nodes.iter().map(|n| (n.id.clone(), Verdict::Pending)).collect()));
+    let verdicts: Rc<RefCell<HashMap<String, Verdict>>> = Rc::new(RefCell::new(
+        ir.nodes
+            .iter()
+            .map(|n| (n.id.clone(), Verdict::Pending))
+            .collect(),
+    ));
     let counts: Rc<RefCell<HashMap<String, u32>>> = Rc::new(RefCell::new(HashMap::new()));
     let base = Rc::new(base);
 
@@ -229,7 +264,9 @@ fn main() {
     }
 
     let mut scheduler = Scheduler::new(graph);
-    let sink = Arc::new(AuditSink { events: AtomicU64::new(0) });
+    let sink = Arc::new(AuditSink {
+        events: AtomicU64::new(0),
+    });
     scheduler.install_telemetry_sink(sink.clone());
 
     for n in &ir.nodes {
@@ -247,20 +284,30 @@ fn main() {
             use_message("build", move |_msg| {
                 let (verdict, attempts) = build_with_retry(&nid, &jobs_c, &base_c, &counts_c);
                 if attempts > 1 && verdict == Verdict::Green {
-                    println!("   ↻ {nid} repaired after {attempts} attempts (doer used tester feedback)");
+                    println!(
+                        "   ↻ {nid} repaired after {attempts} attempts (doer used tester feedback)"
+                    );
                 }
                 verdicts_c.borrow_mut().insert(nid.clone(), verdict);
             });
             PermissionManifest::new(["build"], Vec::<String>::new())
         };
         scheduler
-            .register_node(NodeDefinition::new(n.id.clone(), body), n.id.as_str(), Attrs::new(), 0)
+            .register_node(
+                NodeDefinition::new(n.id.clone(), body),
+                n.id.as_str(),
+                Attrs::new(),
+                0,
+            )
             .expect("register dyad");
     }
     scheduler.start().expect("scheduler start");
 
     // ---- initial bottom-up build ----
-    println!("\n== bottom-up build ({} generations) ==", plan.generations.len());
+    println!(
+        "\n== bottom-up build ({} generations) ==",
+        plan.generations.len()
+    );
     let mut failed = false;
     for (gi, gen) in plan.generations.iter().enumerate() {
         println!("\n-- generation {gi}: [{}] --", gen.join(", "));
@@ -269,7 +316,11 @@ fn main() {
         }
         scheduler.process_batch().expect("process_batch");
         for node in gen {
-            let verdict = verdicts.borrow().get(node).cloned().unwrap_or(Verdict::Pending);
+            let verdict = verdicts
+                .borrow()
+                .get(node)
+                .cloned()
+                .unwrap_or(Verdict::Pending);
             if !report(node, &verdict) {
                 failed = true;
             }
@@ -292,12 +343,21 @@ fn main() {
         }
         println!("\n== re-architecture event: {target} ==");
         // Blast radius = the node itself + its transitive consumers, in build order.
-        let mut set: Vec<String> = std::iter::once(target.clone()).chain(plan.invalidation_set(&target)).collect();
+        let mut set: Vec<String> = std::iter::once(target.clone())
+            .chain(plan.invalidation_set(&target))
+            .collect();
         set.sort_by_key(|n| plan.order.iter().position(|x| x == n).unwrap_or(usize::MAX));
-        let untouched: Vec<String> =
-            plan.order.iter().filter(|id| !set.contains(id)).cloned().collect();
+        let untouched: Vec<String> = plan
+            .order
+            .iter()
+            .filter(|id| !set.contains(id))
+            .cloned()
+            .collect();
         println!("   blast radius (invalidation_set):  [{}]", set.join(", "));
-        println!("   NOT rebuilt (out of scope):       [{}]", untouched.join(", "));
+        println!(
+            "   NOT rebuilt (out of scope):       [{}]",
+            untouched.join(", ")
+        );
 
         let counts_before = counts.borrow().clone();
         let mut rearch_failed = false;
@@ -305,7 +365,11 @@ fn main() {
             verdicts.borrow_mut().insert(node.clone(), Verdict::Pending);
             scheduler.send(node.as_str(), "build", Value::Null);
             scheduler.process_batch().expect("process_batch");
-            let verdict = verdicts.borrow().get(node).cloned().unwrap_or(Verdict::Pending);
+            let verdict = verdicts
+                .borrow()
+                .get(node)
+                .cloned()
+                .unwrap_or(Verdict::Pending);
             if !report(node, &verdict) {
                 rearch_failed = true;
             }
@@ -320,7 +384,10 @@ fn main() {
             if before != after {
                 scope_ok = false;
             }
-            println!("   untouched {id:<14} built {after}× (unchanged: {})", before == after);
+            println!(
+                "   untouched {id:<14} built {after}× (unchanged: {})",
+                before == after
+            );
         }
 
         if rearch_failed || !scope_ok {
@@ -330,7 +397,10 @@ fn main() {
         println!("\n✅ re-architecture converged, blast radius scoped to invalidation_set");
     }
 
-    println!("\n[telemetry] {} messages delivered through the scheduler", sink.events.load(Ordering::Relaxed));
+    println!(
+        "\n[telemetry] {} messages delivered through the scheduler",
+        sink.events.load(Ordering::Relaxed)
+    );
     println!("[build counts] {:?}", counts.borrow());
     println!("\n✅ Foundry: BuildPlan → GraphReact nodes → supervised bottom-up build + scoped re-architecture");
 }

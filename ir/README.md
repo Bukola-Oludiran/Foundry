@@ -3,6 +3,7 @@
 The formal artifact an **architecture role** emits and everything downstream compiles from.
 Language-neutral source of truth: [`schema.json`](schema.json) (JSON Schema 2020-12).
 Worked example: [`examples/string-utils.ir.json`](examples/string-utils.ir.json).
+The current wire format is `ir_version: 1`; unknown versions and unknown fields fail closed.
 
 ## The atom is a dyad
 
@@ -46,8 +47,8 @@ A node can be a dependency for multiple upstreams (DAG fan-in) while still havin
 - Each leaf's **read-set** (from `requires` → providers' `write_target`, read-only).
 - Topological generations (build order; leaves first).
 
-## Deferred to slice 2 (representation is ready now)
+## Architecture-agent work remaining
 
 - **Shared-node placement** — when a node is required by multiple owners, place its ownership at the
   **LCA** of its consumers and make its `provides` the **union** of their requirements. The DAG
-  representation already supports the fan-in; only the placement/union algorithm is deferred.
+  representation already supports the fan-in. Delivery is tracked in [`../docs/roadmap.md`](../docs/roadmap.md).

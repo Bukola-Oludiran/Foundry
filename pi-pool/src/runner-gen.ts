@@ -35,13 +35,21 @@ export const VERDICT_SENTINEL = "__FOUNDRY_VERDICT__";
 export interface RunnerVerdict {
   passed: number;
   failed: number;
-  failures: { case: string; expected: unknown; actual: unknown; error: string | null; passed: boolean }[];
+  failures: {
+    case: string;
+    expected: unknown;
+    actual: unknown;
+    error: string | null;
+    passed: boolean;
+  }[];
 }
 
 export function generatePythonRunner(input: GenInput): string {
   const { moduleImportName, opNames, cases } = input;
   // base64 the cases so arbitrary case content can never break out of the source string.
-  const casesB64 = Buffer.from(JSON.stringify(cases), "utf-8").toString("base64");
+  const casesB64 = Buffer.from(JSON.stringify(cases), "utf-8").toString(
+    "base64",
+  );
   const importLine =
     opNames.length > 0
       ? `from ${moduleImportName} import ${opNames.join(", ")}`

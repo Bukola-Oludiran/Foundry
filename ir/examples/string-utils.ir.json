@@ -1,4 +1,5 @@
 {
+  "ir_version": 1,
   "spec": {
     "name": "string-utils",
     "description": "A tiny string utility library exposing slugify, composed from lowercase, trim, and hyphenate primitives. The v1 falsification-instrument spec: small, pure, cleanly Piston-judgeable, a one-level ownership tree with a fan-in dependency DAG.",

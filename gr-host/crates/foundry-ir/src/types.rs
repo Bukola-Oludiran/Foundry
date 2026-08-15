@@ -1,18 +1,20 @@
-//! Serde types mirroring `Foundry/ir/schema.json`. Parsing is lenient (unknown fields
-//! ignored) — the JSON Schema is the strict author-facing guard; `compile` enforces the
-//! load-bearing integrity rules.
+//! Serde types mirroring `Foundry/ir/schema.json`. Unknown fields are rejected so the
+//! host cannot accidentally accept an IR dialect that the author-facing schema rejects.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Ir {
+    pub ir_version: u32,
     pub spec: Spec,
     pub root: String,
     pub nodes: Vec<Node>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spec {
     pub name: String,
     #[serde(default)]
@@ -29,6 +31,7 @@ pub enum Kind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Node {
     pub id: String,
     pub kind: Kind,
@@ -41,6 +44,7 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Interface {
     pub name: String,
     pub operations: Vec<Operation>,
@@ -49,6 +53,7 @@ pub struct Interface {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Operation {
     pub name: String,
     pub signature: String,
@@ -59,20 +64,21 @@ pub struct Operation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TypeDef {
     pub name: String,
     pub definition: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InterfaceRef {
     pub node: String,
     pub interface: String,
 }
 
-/// Lenient union of leaf + integrator implementation shapes; `compile` enforces which
-/// fields must be present for each `Kind`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Implementation {
     #[serde(default)]
     pub language: Option<String>,
@@ -86,6 +92,7 @@ pub struct Implementation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestBundle {
     pub mandate_owner: String,
     pub language: String,
@@ -97,6 +104,7 @@ pub struct TestBundle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestCase {
     pub name: String,
     #[serde(default)]
@@ -108,6 +116,7 @@ pub struct TestCase {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Perf {
     #[serde(default)]
     pub time_ms: Option<u64>,
