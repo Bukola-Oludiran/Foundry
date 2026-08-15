@@ -133,6 +133,11 @@ Status: editable preview implementation.
 - Implemented delivery: terminal green builds invoke the idempotent draft-only publisher, attach
   proposal/review/approval/diff evidence, and durably advance the revision to `delivered` only after
   publication succeeds.
+- Implemented acceptance foundation: the desktop E2E harness persists exact proposal state across
+  reload and exercises initial architecture, deep links, dependency drawing, conflict recovery,
+  semantic editing, branching, generative repair with independent critique, human approval, build
+  submission, and cancellation. Foundry also injects the artifact-written/head-uncommitted crash
+  boundary and proves recovery plus idempotent retry.
 - Remaining before public release: exhaustive desktop Playwright/crash-matrix acceptance.
 
 ## Deferred

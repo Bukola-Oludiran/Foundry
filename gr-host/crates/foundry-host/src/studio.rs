@@ -1409,6 +1409,70 @@ mod tests {
     }
 
     #[test]
+    fn crash_between_artifact_write_and_head_commit_leaves_head_recoverable() {
+        let (root, ir) = fixture();
+        let created = create(
+            &root,
+            binding(),
+            ir,
+            StudioRationaleV1::default(),
+            "human",
+            "Crash-safe architecture",
+            "create-crash-boundary",
+        )
+        .unwrap();
+        let proposal = created.proposals[0].clone();
+        let before = snapshot(&root, &created.run_id, &proposal.proposal_id).unwrap();
+        let persistence = engine(&root).unwrap();
+        let run_id = RunId::parse(created.run_id.clone()).unwrap();
+        let mut orphan_revision = before.revision.clone();
+        orphan_revision.revision_id = RunId::new().to_string();
+        orphan_revision.parent_revision_id = Some(before.revision.revision_id.clone());
+        orphan_revision.phase = StudioRevisionPhaseV1::AwaitingCritic;
+
+        let orphan = revision_artifacts(
+            &persistence,
+            &run_id,
+            orphan_revision,
+            &before.ir,
+            &before.rationale,
+            &before.locks,
+            &before.layout,
+            &["hyphenate".into()],
+            &["hyphenate".into()],
+        )
+        .unwrap();
+        drop(persistence);
+
+        let recovered = snapshot(&root, &created.run_id, &proposal.proposal_id).unwrap();
+        assert_eq!(recovered.revision, before.revision);
+        assert_eq!(recovered.proposal, before.proposal);
+
+        let persistence = engine(&root).unwrap();
+        let orphan_id = ArtifactId::parse(orphan.ir_artifact_id).unwrap();
+        assert!(block_on(persistence.read_artifact(&orphan_id))
+            .unwrap()
+            .is_some());
+        drop(persistence);
+
+        let command = StudioCommandV1 {
+            command_version: 1,
+            command_id: "command-after-crash".into(),
+            proposal_id: proposal.proposal_id,
+            expected_head_digest: proposal.head_semantic_digest,
+            actor_pubkey: "human".into(),
+            operations: vec![StudioOperationV1::SetWriteTarget {
+                node_id: "hyphenate".into(),
+                write_target: "src/recovered.py".into(),
+            }],
+        };
+        let committed = apply_command(&root, &created.run_id, &command, "recover-edit").unwrap();
+        let retried = apply_command(&root, &created.run_id, &command, "recover-edit").unwrap();
+        assert_eq!(retried.revision, committed.revision);
+        assert_eq!(retried.proposal, committed.proposal);
+    }
+
+    #[test]
     fn stale_head_and_idempotency_conflict_fail_closed() {
         let (root, ir) = fixture();
         let state = create(
