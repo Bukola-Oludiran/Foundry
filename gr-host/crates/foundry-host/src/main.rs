@@ -13,6 +13,7 @@
 //!
 //! Usage: foundry-host --ir <path> [--pi-pool URL] [--workspace DIR] [--rearchitect NODE]
 
+mod agent_runtime;
 mod architect;
 mod collaboration;
 mod durable;
@@ -20,6 +21,7 @@ mod http;
 mod repository;
 mod sidecar;
 mod studio;
+mod studio_room;
 mod studio_service;
 use http::http_post_json;
 use repository::{

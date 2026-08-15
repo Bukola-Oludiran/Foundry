@@ -138,6 +138,24 @@ Status: editable preview implementation.
   semantic editing, branching, generative repair with independent critique, human approval, build
   submission, and cancellation. Foundry also injects the artifact-written/head-uncommitted crash
   boundary and proves recovery plus idempotent retry.
+- Implemented multi-human approval acceptance: promotion counts distinct eligible signers for the
+  exact semantic digest, duplicate approvals from one signer cannot satisfy a protected-branch
+  threshold, approval progress survives restart, and Build remains gated until the threshold is met.
+- Implemented Foundry side of Buzz-managed intelligence: a provider-neutral `AgentRuntime` routes
+  both initial and generative architect/critic jobs to the existing pi-pool adapter or a versioned
+  Buzz ACP submit/status/cancel protocol. Stable IDs survive polling/retry, responses fail closed on
+  identity mismatch, and architect/critic runtime identities must remain independent.
+- Buzz now supplies a runnable authenticated gateway, transport-neutral durable job ledger, and
+  bounded ACP executor. It enforces role-scoped identities, request-digest idempotency, exclusive
+  durability ownership, restart recovery, immutable terminal results, rejected tool permissions,
+  explicit child environments, and strict JSON output.
+- Implemented durable Architecture Room foundation: asynchronous initial operations, hash-chained
+  proposal transcripts, authenticated cursor/SSE recovery, curated ACP lifecycle/plan/tool events,
+  compiler diagnostics, three-round architect–critic repair, monotonic cancellation, acknowledged
+  immediate steering with checkpoint fallback, structured question/answer resumption, and Buzz
+  timeline/filter/reconnect/offline projections.
+- Remaining for the ACP path: issue short-lived workload capabilities from Buzz's NIP-98 community
+  session, resolve current repository authority, and add OCI isolation.
 - Remaining before public release: exhaustive desktop Playwright/crash-matrix acceptance.
 
 ## Deferred

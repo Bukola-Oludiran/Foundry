@@ -7,9 +7,11 @@ use foundry_ir::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::agent_runtime::{AgentJobRequestV1, AgentRoleV1, AgentRuntime};
 use crate::http::http_post_json;
 
 const MAX_ARCHITECT_ATTEMPTS: u32 = 3;
+const IR_SCHEMA: &str = include_str!("../../../../ir/schema.json");
 
 pub trait ArchitectureAgent {
     fn propose(
@@ -18,11 +20,108 @@ pub trait ArchitectureAgent {
         attempt: u32,
         diagnostics: &[String],
     ) -> Result<(Value, String), String>;
+
+    fn report_diagnostics(&self, _attempt: u32, _diagnostics: &[String]) {}
 }
 
 pub struct WorkerArchitectureAgent<'a> {
     pub base: &'a str,
     pub token: &'a str,
+}
+
+/// Architecture agent backed by a provider-neutral runtime.
+pub struct RuntimeArchitectureAgent<'a> {
+    pub runtime: &'a dyn AgentRuntime,
+    pub run_id: &'a str,
+    pub event_sink: Option<&'a (dyn Fn(Value) + Send + Sync)>,
+}
+
+fn architecture_job_id(run_id: &str, request: &Value) -> Result<String, String> {
+    let digest_input = json!({"run_id": run_id, "request": request});
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&digest_input).map_err(|error| error.to_string())?)
+    );
+    Ok(format!("architect-{digest}"))
+}
+
+impl ArchitectureAgent for RuntimeArchitectureAgent<'_> {
+    fn propose(
+        &self,
+        request: &ArchitectureRequest,
+        attempt: u32,
+        diagnostics: &[String],
+    ) -> Result<(Value, String), String> {
+        let request_value = json!({
+            "request": request,
+            "attempt": attempt,
+            "diagnostics": diagnostics,
+        });
+        let job_id = architecture_job_id(self.run_id, &request_value)?;
+        let job = AgentJobRequestV1::new(
+            &job_id,
+            self.run_id,
+            AgentRoleV1::Architect,
+            "architect",
+            json!({
+                "protocol_version": 1,
+                "job_id": job_id,
+                "attempt": attempt,
+                "diagnostics": diagnostics,
+                "request": request,
+                "proposal_schema": serde_json::from_str::<Value>(IR_SCHEMA)
+                    .map_err(|error| format!("embedded IR schema is invalid: {error}"))?,
+            }),
+        );
+        let response = match self.event_sink {
+            Some(event_sink) => self.runtime.execute_with_events(&job, event_sink),
+            None => self.runtime.execute(&job),
+        }?;
+        if let Some(question) = response.get("question") {
+            let question_id = question
+                .get("question_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "architecture question omitted question_id".to_string())?;
+            let prompt = question
+                .get("prompt")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "architecture question omitted prompt".to_string())?;
+            return Err(format!(
+                "ARCHITECT_QUESTION:{}",
+                serde_json::to_string(&json!({
+                    "question_id": question_id,
+                    "prompt": prompt,
+                }))
+                .map_err(|error| error.to_string())?
+            ));
+        }
+        let proposal = response
+            .get("proposal")
+            .cloned()
+            .ok_or_else(|| "architecture runtime omitted proposal".to_string())?;
+        let rationale = response
+            .get("rationale")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "architecture runtime omitted rationale".to_string())?
+            .to_owned();
+        Ok((proposal, rationale))
+    }
+
+    fn report_diagnostics(&self, attempt: u32, diagnostics: &[String]) {
+        let Some(event_sink) = self.event_sink else {
+            return;
+        };
+        let digest = Sha256::digest(
+            serde_json::to_vec(&(self.run_id, attempt, diagnostics)).unwrap_or_default(),
+        );
+        event_sink(json!({
+            "protocol_version": 2,
+            "event_id": format!("compiler-{:x}", digest),
+            "job_id": format!("{}:compiler", self.run_id),
+            "kind": "compiler_diagnostics",
+            "diagnostics": diagnostics,
+        }));
+    }
 }
 
 impl ArchitectureAgent for WorkerArchitectureAgent<'_> {
@@ -101,6 +200,7 @@ pub fn architect(
                     .collect();
                 if !disallowed.is_empty() {
                     diagnostics = disallowed;
+                    agent.report_diagnostics(attempt, &diagnostics);
                     continue;
                 }
                 match compile(&ir) {
@@ -120,10 +220,14 @@ pub fn architect(
                     }
                     Err(errors) => {
                         diagnostics = errors.into_iter().map(|error| error.to_string()).collect();
+                        agent.report_diagnostics(attempt, &diagnostics);
                     }
                 }
             }
-            Err(error) => diagnostics = vec![format!("IR JSON contract violation: {error}")],
+            Err(error) => {
+                diagnostics = vec![format!("IR JSON contract violation: {error}")];
+                agent.report_diagnostics(attempt, &diagnostics);
+            }
         }
     }
     Err(format!(
@@ -264,6 +368,14 @@ mod tests {
         assert!(output.is_file());
         let _ = std::fs::remove_file(&output);
         let _ = std::fs::remove_file(output.with_extension("json.rationale.md"));
+    }
+
+    #[test]
+    fn runtime_job_identity_is_stable_within_a_run_and_distinct_across_runs() {
+        let request = json!({"spec": "same"});
+        let first = architecture_job_id("run-one", &request).unwrap();
+        assert_eq!(first, architecture_job_id("run-one", &request).unwrap());
+        assert_ne!(first, architecture_job_id("run-two", &request).unwrap());
     }
 
     #[test]

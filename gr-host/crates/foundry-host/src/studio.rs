@@ -1592,4 +1592,88 @@ mod tests {
         let delivered = snapshot(&root, &state.run_id, &proposal.proposal_id).unwrap();
         assert_eq!(delivered.revision.phase, StudioRevisionPhaseV1::Delivered);
     }
+
+    #[test]
+    fn promotion_requires_distinct_human_signers() {
+        let (root, ir) = fixture();
+        let state = create(
+            &root,
+            binding(),
+            ir,
+            StudioRationaleV1::default(),
+            "architect",
+            "Two-person governed architecture",
+            "create-two-person",
+        )
+        .unwrap();
+        let proposal = &state.proposals[0];
+        record_critic_review(
+            &root,
+            &state.run_id,
+            &proposal.proposal_id,
+            &proposal.head_semantic_digest,
+            "independent-critic",
+            CriticVerdictV1::Approved,
+            Vec::new(),
+            "critic-two-person",
+        )
+        .unwrap();
+
+        ingest_verified_human_approval(
+            &root,
+            &state.run_id,
+            &proposal.proposal_id,
+            &proposal.head_semantic_digest,
+            "event-owner-one",
+            "human-owner",
+            "approval-owner-one",
+        )
+        .unwrap();
+        ingest_verified_human_approval(
+            &root,
+            &state.run_id,
+            &proposal.proposal_id,
+            &proposal.head_semantic_digest,
+            "event-owner-two",
+            "human-owner",
+            "approval-owner-two",
+        )
+        .unwrap();
+
+        let insufficient = promote_proposal(
+            &root,
+            &state.run_id,
+            &proposal.proposal_id,
+            &proposal.head_semantic_digest,
+            2,
+            "promote-too-early",
+        )
+        .unwrap_err();
+        assert_eq!(insufficient.code(), "FORBIDDEN");
+        assert!(insufficient
+            .to_string()
+            .contains("2 distinct human approvals required; 1 received"));
+
+        ingest_verified_human_approval(
+            &root,
+            &state.run_id,
+            &proposal.proposal_id,
+            &proposal.head_semantic_digest,
+            "event-maintainer",
+            "human-maintainer",
+            "approval-maintainer",
+        )
+        .unwrap();
+        let promoted = promote_proposal(
+            &root,
+            &state.run_id,
+            &proposal.proposal_id,
+            &proposal.head_semantic_digest,
+            2,
+            "promote-two-person",
+        )
+        .unwrap();
+        assert_eq!(promoted.proposal.status, ProposalStatusV1::Approved);
+        assert_eq!(promoted.state.human_approvals.len(), 3);
+    }
 }

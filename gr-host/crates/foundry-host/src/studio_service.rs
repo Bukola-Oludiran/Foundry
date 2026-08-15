@@ -29,7 +29,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
 
+use crate::agent_runtime::{
+    AgentGuidanceDeliveryV2, AgentJobRequestV1, AgentRoleV1, AgentRuntime, BuzzAcpAgentRuntime,
+    PiPoolAgentRuntime,
+};
 use crate::studio::{self, StudioError, StudioSnapshotV1};
+use crate::studio_room::{
+    ArchitectureOperationKindV1, ArchitectureOperationStateV1, ArchitectureRoomActorKindV1,
+    ArchitectureRoomError, ArchitectureRoomLedger, ArchitectureRoomPayloadV1, GuidanceDeliveryV1,
+    GuidanceModeV1,
+};
 
 const SESSION_TTL_SECONDS: u64 = 300;
 const NIP98_MAX_AGE_SECONDS: u64 = 60;
@@ -46,8 +55,8 @@ struct ServiceState {
     repository_paths: Arc<HashMap<String, PathBuf>>,
     worker_url: String,
     worker_token: String,
-    critic_url: String,
-    critic_token: String,
+    architect_runtime: Arc<dyn AgentRuntime>,
+    critic_runtime: Arc<dyn AgentRuntime>,
     policy: Arc<Policy>,
     sessions: Arc<Mutex<HashMap<String, Capability>>>,
     nip98_replays: Arc<Mutex<HashMap<String, u64>>>,
@@ -137,6 +146,25 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<ArchitectureRoomError> for ApiError {
+    fn from(error: ArchitectureRoomError) -> Self {
+        let (status, code) = match &error {
+            ArchitectureRoomError::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_COMMAND"),
+            ArchitectureRoomError::IdempotencyConflict => {
+                (StatusCode::CONFLICT, "IDEMPOTENCY_CONFLICT")
+            }
+            ArchitectureRoomError::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ArchitectureRoomError::InvalidTransition(_) => {
+                (StatusCode::CONFLICT, "INVALID_TRANSITION")
+            }
+            ArchitectureRoomError::Storage(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_NOT_READY")
+            }
+        };
+        Self::new(status, code, error.to_string())
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SessionRequest {
@@ -171,7 +199,7 @@ struct CreateStudioRequest {
     title: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ArchitectStudioRequest {
     binding: StudioBindingV1,
@@ -254,6 +282,41 @@ struct DiscoveryQuery {
     repository: String,
     proposal: Option<String>,
     revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomEventsQuery {
+    #[serde(default)]
+    after: u64,
+    #[serde(default = "default_room_page_limit")]
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationListQuery {
+    repository: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchitectureGuidanceRequest {
+    message_id: String,
+    mode: GuidanceModeV1,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchitectureQuestionAnswerRequest {
+    question_id: String,
+    message_id: String,
+    content: String,
+}
+
+fn default_room_page_limit() -> usize {
+    200
 }
 
 #[derive(Serialize)]
@@ -1035,10 +1098,10 @@ async fn readiness(State(state): State<Arc<ServiceState>>) -> impl IntoResponse 
         .await
         .is_ok_and(|response| response.status().is_success());
     let configured_dependencies = reqwest::Url::parse(&state.worker_url).is_ok()
-        && reqwest::Url::parse(&state.critic_url).is_ok()
-        && state.worker_url != state.critic_url
+        && state.architect_runtime.identity() != state.critic_runtime.identity()
         && !state.worker_token.is_empty()
-        && !state.critic_token.is_empty();
+        && !state.architect_runtime.identity().is_empty()
+        && !state.critic_runtime.identity().is_empty();
     let ready = persistence && repositories && relay && configured_dependencies;
     let status = if ready {
         StatusCode::OK
@@ -1161,6 +1224,156 @@ fn projection(
     }
 }
 
+fn project_agent_runtime_event(
+    durability_dir: &std::path::Path,
+    operation_id: &str,
+    actor_kind: ArchitectureRoomActorKindV1,
+    actor_id: &str,
+    event: Value,
+) {
+    let Some(source_event_id) = event.get("event_id").and_then(Value::as_str) else {
+        return;
+    };
+    let job_id = event.get("job_id").and_then(Value::as_str);
+    let payload = match event.get("kind").and_then(Value::as_str) {
+        Some("lifecycle") => ArchitectureRoomPayloadV1::Message {
+            message: event
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Agent lifecycle changed")
+                .to_owned(),
+        },
+        Some("plan") => ArchitectureRoomPayloadV1::Plan {
+            summary: event
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("Agent updated its working plan")
+                .to_owned(),
+        },
+        Some("tool") => ArchitectureRoomPayloadV1::Tool {
+            category: event
+                .get("category")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_owned(),
+            purpose: event
+                .get("purpose")
+                .and_then(Value::as_str)
+                .unwrap_or("Agent tool activity")
+                .to_owned(),
+            status: event
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("updated")
+                .to_owned(),
+            duration_ms: None,
+            result_summary: None,
+        },
+        Some("message") => ArchitectureRoomPayloadV1::Message {
+            message: event
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Agent completed its response")
+                .to_owned(),
+        },
+        Some("compiler_diagnostics") => ArchitectureRoomPayloadV1::CompilerDiagnostics {
+            diagnostics: event
+                .get("diagnostics")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(200)
+                .map(|diagnostic| diagnostic.chars().take(16 * 1024).collect())
+                .collect(),
+        },
+        _ => return,
+    };
+    let _ = ArchitectureRoomLedger::open(durability_dir).and_then(|ledger| {
+        if let Some(job_id) = job_id {
+            ledger.set_active_job(operation_id, actor_kind, job_id)?;
+        }
+        ledger.append_external_event(operation_id, source_event_id, actor_kind, actor_id, payload)
+    });
+}
+
+async fn execute_room_critic(
+    state: &Arc<ServiceState>,
+    run_id: &str,
+    snapshot: &StudioSnapshotV1,
+    room_operation_id: Option<&str>,
+) -> Result<(CriticVerdictV1, Vec<String>), ApiError> {
+    let critic_runtime = Arc::clone(&state.critic_runtime);
+    let critic_job_id = format!(
+        "studio-critic-{:x}",
+        sha2::Sha256::digest(format!("{run_id}:{}", snapshot.revision.semantic_digest))
+    );
+    let critic_payload = json!({
+        "job_id": &critic_job_id,
+        "ir": &snapshot.ir,
+        "semantic_digest": &snapshot.revision.semantic_digest,
+        "rationale": &snapshot.rationale,
+        "locks": &snapshot.locks,
+    });
+    let critic_room_operation = room_operation_id.map(str::to_owned);
+    let critic_room_durability = state.durability_dir.clone();
+    let critic_identity = state.critic_runtime.identity().to_owned();
+    let critic_run_id = run_id.to_owned();
+    let critic = tokio::task::spawn_blocking(move || {
+        let job = AgentJobRequestV1::new(
+            critic_job_id,
+            critic_run_id,
+            AgentRoleV1::Critic,
+            "architecture_review",
+            critic_payload,
+        );
+        let event_sink = |event: Value| {
+            if let Some(operation_id) = &critic_room_operation {
+                project_agent_runtime_event(
+                    &critic_room_durability,
+                    operation_id,
+                    ArchitectureRoomActorKindV1::Critic,
+                    &critic_identity,
+                    event,
+                );
+            }
+        };
+        match critic_room_operation.as_ref() {
+            Some(_) => critic_runtime.execute_with_events(&job, &event_sink),
+            None => critic_runtime.execute(&job),
+        }
+    })
+    .await
+    .map_err(|error| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_NOT_READY",
+            error.to_string(),
+        )
+    })?
+    .map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "SERVICE_NOT_READY", error))?;
+    let verdict = match critic.get("verdict").and_then(Value::as_str) {
+        Some("approved") => CriticVerdictV1::Approved,
+        Some("changes_requested") => CriticVerdictV1::ChangesRequested,
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_NOT_READY",
+                "critic returned an invalid verdict",
+            ))
+        }
+    };
+    let diagnostics = critic
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    Ok((verdict, diagnostics))
+}
+
 async fn create_studio(
     State(state): State<Arc<ServiceState>>,
     headers: HeaderMap,
@@ -1218,9 +1431,21 @@ async fn architect_studio(
     headers: HeaderMap,
     Json(request): Json<ArchitectStudioRequest>,
 ) -> Result<Json<StudioProjection>, ApiError> {
+    let capability = authorize_architect_request(&state, &headers, &request).await?;
+    let operation = operation_key(&headers)?.to_owned();
+    run_architect_studio(state, capability, request, operation, None)
+        .await
+        .map(Json)
+}
+
+async fn authorize_architect_request(
+    state: &ServiceState,
+    headers: &HeaderMap,
+    request: &ArchitectStudioRequest,
+) -> Result<Capability, ApiError> {
     let mut capability = capability(
-        &state,
-        &headers,
+        state,
+        headers,
         &request.binding.repository_coordinate,
         "edit",
     )?;
@@ -1232,7 +1457,7 @@ async fn architect_studio(
         ));
     }
     let signed_policy = signed_repository_policy(
-        &state,
+        state,
         &request.binding.repository_coordinate,
         &request.binding.target_branch,
     )
@@ -1240,11 +1465,21 @@ async fn architect_studio(
     capability.approval_threshold = signed_policy
         .approval_threshold
         .max(state.policy.approval_threshold);
-    let operation = operation_key(&headers)?.to_owned();
+    Ok(capability)
+}
+
+async fn run_architect_studio(
+    state: Arc<ServiceState>,
+    capability: Capability,
+    request: ArchitectStudioRequest,
+    operation: String,
+    room_operation_id: Option<&str>,
+) -> Result<StudioProjection, ApiError> {
+    let operation_file_key = format!("{:x}", sha2::Sha256::digest(operation.as_bytes()));
     let output = state
         .durability_dir
         .join("agent-candidates")
-        .join(format!("initial-{operation}.ir.json"));
+        .join(format!("initial-{operation_file_key}.ir.json"));
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             ApiError::new(
@@ -1295,6 +1530,9 @@ async fn architect_studio(
             &request,
         )?;
     }
+    let product_spec = request.product_spec.clone();
+    let repository_coordinate = request.binding.repository_coordinate.clone();
+    let base_commit = request.binding.base_commit.clone();
     let architecture_request = ArchitectureRequest {
         architecture_version: 1,
         product_spec: request.product_spec.clone(),
@@ -1304,8 +1542,11 @@ async fn architect_studio(
         policy_constraints: request.policy_constraints,
         existing_ir: None,
     };
-    let architect_url = state.worker_url.clone();
-    let architect_token = state.worker_token.clone();
+    let architect_runtime = Arc::clone(&state.architect_runtime);
+    let architect_run_id = format!("studio-create-{operation}");
+    let room_operation = room_operation_id.map(str::to_owned);
+    let room_durability = state.durability_dir.clone();
+    let architect_identity = state.architect_runtime.identity().to_owned();
     let ir = if output.exists() {
         serde_json::from_slice::<Ir>(&std::fs::read(&output).map_err(|error| {
             ApiError::new(
@@ -1325,9 +1566,23 @@ async fn architect_studio(
         let output_for_agent = output.with_extension(format!("{}.tmp", RunId::new()));
         let committed_output = output;
         tokio::task::spawn_blocking(move || {
-            let agent = crate::architect::WorkerArchitectureAgent {
-                base: &architect_url,
-                token: &architect_token,
+            let event_sink = |event: Value| {
+                if let Some(operation_id) = &room_operation {
+                    project_agent_runtime_event(
+                        &room_durability,
+                        operation_id,
+                        ArchitectureRoomActorKindV1::Architect,
+                        &architect_identity,
+                        event,
+                    );
+                }
+            };
+            let agent = crate::architect::RuntimeArchitectureAgent {
+                runtime: architect_runtime.as_ref(),
+                run_id: &architect_run_id,
+                event_sink: room_operation
+                    .as_ref()
+                    .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
             };
             let ir = crate::architect::architect(&agent, &architecture_request, &output_for_agent)?;
             std::fs::rename(&output_for_agent, &committed_output)
@@ -1346,6 +1601,14 @@ async fn architect_studio(
             ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "COMPILER_REJECTED", error)
         })?
     };
+    if let Some(operation_id) = room_operation_id {
+        ArchitectureRoomLedger::open(&state.durability_dir)?.transition(
+            operation_id,
+            ArchitectureOperationStateV1::Compiling,
+            "The architect candidate satisfies the Foundry IR compiler",
+            &state.service_pubkey,
+        )?;
+    }
     let rationale = StudioRationaleV1 {
         entries: ir
             .nodes
@@ -1383,63 +1646,588 @@ async fn architect_studio(
         })?
         .proposal_id
         .clone();
-    let snapshot = studio::snapshot(&state.durability_dir, &created.run_id, &proposal_id)?;
-    let critic_url = state.critic_url.clone();
-    let critic_token = state.critic_token.clone();
-    let critic_payload = json!({
-        "job_id": format!("studio-critic-{}", snapshot.revision.semantic_digest),
-        "ir": &snapshot.ir,
-        "semantic_digest": &snapshot.revision.semantic_digest,
-        "rationale": &snapshot.rationale,
-        "locks": &snapshot.locks,
-    });
-    let critic = tokio::task::spawn_blocking(move || {
-        crate::http::http_post_json(
-            &critic_url,
-            "/architecture-review",
-            &critic_payload,
-            &critic_token,
-        )
-    })
-    .await
-    .map_err(|error| {
+    let mut current = studio::snapshot(&state.durability_dir, &created.run_id, &proposal_id)?;
+    for review_round in 1..=3 {
+        if let Some(operation_id) = room_operation_id {
+            let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+            ledger.set_repair_round(operation_id, review_round - 1)?;
+            ledger.transition(
+                operation_id,
+                ArchitectureOperationStateV1::CriticReview,
+                &format!("The independent critic is reviewing round {review_round} of 3"),
+                &state.service_pubkey,
+            )?;
+        }
+        let (verdict, diagnostics) =
+            execute_room_critic(&state, &created.run_id, &current, room_operation_id).await?;
+        if let Some(operation_id) = room_operation_id {
+            ArchitectureRoomLedger::open(&state.durability_dir)?.append_event(
+                operation_id,
+                ArchitectureRoomActorKindV1::Critic,
+                state.critic_runtime.identity(),
+                ArchitectureRoomPayloadV1::CriticVerdict {
+                    verdict: match &verdict {
+                        CriticVerdictV1::Approved => "approved",
+                        CriticVerdictV1::ChangesRequested => "changes_requested",
+                    }
+                    .into(),
+                    diagnostics: diagnostics.clone(),
+                },
+            )?;
+        }
+        let approved = verdict == CriticVerdictV1::Approved;
+        let reviewed = studio::record_critic_review(
+            &state.durability_dir,
+            &created.run_id,
+            &proposal_id,
+            &current.revision.semantic_digest,
+            &format!("foundry-critic:{}", state.service_pubkey),
+            verdict,
+            diagnostics.clone(),
+            &format!("{operation}:critic:{review_round}"),
+        )?;
+        if approved {
+            return Ok(projection(&state, &capability, reviewed));
+        }
+        if review_round == 3 {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "COMPILER_REJECTED",
+                format!(
+                    "independent critic still requested changes after three rounds: {}",
+                    diagnostics.join("; ")
+                ),
+            ));
+        }
+        if let Some(operation_id) = room_operation_id {
+            ArchitectureRoomLedger::open(&state.durability_dir)?.transition(
+                operation_id,
+                ArchitectureOperationStateV1::Repairing,
+                &format!("The architect is addressing critic feedback for round {review_round}"),
+                &state.service_pubkey,
+            )?;
+        }
+        let mut languages = reviewed
+            .ir
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                node.implementation
+                    .language
+                    .clone()
+                    .or_else(|| reviewed.ir.spec.language.clone())
+            })
+            .collect::<Vec<_>>();
+        languages.sort();
+        languages.dedup();
+        let checkpoint_guidance = match room_operation_id {
+            Some(operation_id) => ArchitectureRoomLedger::open(&state.durability_dir)?
+                .checkpoint_guidance(operation_id)?,
+            None => Vec::new(),
+        };
+        let mut repair_constraints = vec![
+            "Preserve existing external interfaces unless the diagnostic requires a compatible correction".into(),
+            "Return the complete strict Foundry IR v1 document".into(),
+        ];
+        repair_constraints.extend(
+            checkpoint_guidance
+                .into_iter()
+                .map(|guidance| format!("Human checkpoint guidance: {guidance}")),
+        );
+        let repair_request = ArchitectureRequest {
+            architecture_version: 1,
+            product_spec: format!(
+                "Repair the compiled architecture for `{product_spec}` using the independent critic diagnostics: {}",
+                diagnostics.join("; ")
+            ),
+            repository: repository_coordinate.clone(),
+            base_revision: base_commit.clone(),
+            allowed_languages: languages,
+            policy_constraints: repair_constraints,
+            existing_ir: Some(reviewed.ir.clone()),
+        };
+        let repair_output = state.durability_dir.join("agent-candidates").join(format!(
+            "initial-{operation_file_key}-repair-{review_round}.ir.json"
+        ));
+        let repair_runtime = Arc::clone(&state.architect_runtime);
+        let repair_run_id = format!("{}-critic-repair-{review_round}", created.run_id);
+        let repair_room_operation = room_operation_id.map(str::to_owned);
+        let repair_room_durability = state.durability_dir.clone();
+        let repair_identity = state.architect_runtime.identity().to_owned();
+        let candidate = tokio::task::spawn_blocking(move || {
+            let event_sink = |event: Value| {
+                if let Some(operation_id) = &repair_room_operation {
+                    project_agent_runtime_event(
+                        &repair_room_durability,
+                        operation_id,
+                        ArchitectureRoomActorKindV1::Architect,
+                        &repair_identity,
+                        event,
+                    );
+                }
+            };
+            let agent = crate::architect::RuntimeArchitectureAgent {
+                runtime: repair_runtime.as_ref(),
+                run_id: &repair_run_id,
+                event_sink: repair_room_operation
+                    .as_ref()
+                    .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
+            };
+            crate::architect::architect(&agent, &repair_request, &repair_output)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_NOT_READY",
+                error.to_string(),
+            )
+        })?
+        .map_err(|error| {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "COMPILER_REJECTED", error)
+        })?;
+        let repair_rationale = StudioRationaleV1 {
+            entries: candidate
+                .nodes
+                .iter()
+                .map(|node| {
+                    (
+                        node.id.clone(),
+                        RationaleEntryV1 {
+                            summary: format!(
+                                "Critic-guided architecture repair round {}",
+                                review_round + 1
+                            ),
+                            responsibilities: vec![format!("Provide {}", node.provides.name)],
+                            constraints: diagnostics.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        current = studio::apply_generated_candidate(
+            &state.durability_dir,
+            &created.run_id,
+            &proposal_id,
+            &reviewed.revision.semantic_digest,
+            &format!("foundry-architect:{}", state.service_pubkey),
+            candidate,
+            repair_rationale,
+            &format!("{operation}:repair:{review_round}"),
+        )?;
+        if let Some(operation_id) = room_operation_id {
+            ArchitectureRoomLedger::open(&state.durability_dir)?.transition(
+                operation_id,
+                ArchitectureOperationStateV1::Compiling,
+                "The repaired candidate satisfies the Foundry IR compiler",
+                &state.service_pubkey,
+            )?;
+        }
+    }
+    Err(ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "SERVICE_NOT_READY",
+        "critic loop ended without a terminal decision",
+    ))
+}
+
+async fn submit_architecture_operation(
+    State(state): State<Arc<ServiceState>>,
+    headers: HeaderMap,
+    Json(request): Json<ArchitectStudioRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let capability = authorize_architect_request(&state, &headers, &request).await?;
+    let idempotency_key = operation_key(&headers)?.to_owned();
+    let request_value = serde_json::to_value(&request).map_err(|error| {
         ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMMAND",
+            error.to_string(),
+        )
+    })?;
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let (operation, created) = ledger.create(
+        &request.binding.repository_coordinate,
+        &idempotency_key,
+        &request_value,
+        ArchitectureOperationKindV1::InitialArchitecture,
+        &capability.actor_pubkey,
+        capability.approval_threshold,
+        capability.operations.iter().cloned().collect(),
+        capability.human,
+    )?;
+    if created {
+        spawn_architecture_operation(
+            Arc::clone(&state),
+            operation.operation_id.clone(),
+            capability,
+            request,
+            idempotency_key,
+        );
+    }
+    Ok((
+        if created {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(serde_json::to_value(operation).map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERVICE_NOT_READY",
+                error.to_string(),
+            )
+        })?),
+    ))
+}
+
+fn spawn_architecture_operation(
+    task_state: Arc<ServiceState>,
+    operation_id: String,
+    capability: Capability,
+    request: ArchitectStudioRequest,
+    idempotency_key: String,
+) {
+    let task_actor = capability.actor_pubkey.clone();
+    tokio::spawn(async move {
+        let ledger = match ArchitectureRoomLedger::open(&task_state.durability_dir) {
+            Ok(ledger) => ledger,
+            Err(_) => return,
+        };
+        let current = match ledger.get(&operation_id) {
+            Ok(operation) => operation,
+            Err(_) => return,
+        };
+        if current.state == ArchitectureOperationStateV1::Queued
+            && ledger
+                .transition(
+                    &operation_id,
+                    ArchitectureOperationStateV1::Architecting,
+                    "The architect is producing a candidate ownership tree",
+                    &task_state.service_pubkey,
+                )
+                .is_err()
+        {
+            return;
+        }
+        match run_architect_studio(
+            Arc::clone(&task_state),
+            capability,
+            request,
+            idempotency_key,
+            Some(&operation_id),
+        )
+        .await
+        {
+            Ok(projection) => {
+                let result = match serde_json::to_value(&projection) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = ledger.transition(
+                            &operation_id,
+                            ArchitectureOperationStateV1::Failed,
+                            &error.to_string(),
+                            &task_state.service_pubkey,
+                        );
+                        return;
+                    }
+                };
+                let _ = ledger.complete(
+                    &operation_id,
+                    &projection.snapshot.state.run_id,
+                    &projection.snapshot.proposal.proposal_id,
+                    &projection.snapshot.revision.revision_id,
+                    &projection.snapshot.revision.semantic_digest,
+                    result,
+                    &task_state.service_pubkey,
+                );
+            }
+            Err(error) => {
+                if let Some(encoded) = error.body.message.strip_prefix("ARCHITECT_QUESTION:") {
+                    if let Ok(question) = serde_json::from_str::<Value>(encoded) {
+                        if let (Some(question_id), Some(prompt)) = (
+                            question.get("question_id").and_then(Value::as_str),
+                            question.get("prompt").and_then(Value::as_str),
+                        ) {
+                            let _ = ledger.wait_for_input(
+                                &operation_id,
+                                question_id,
+                                prompt,
+                                task_state.architect_runtime.identity(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                let _ = ledger.append_event(
+                    &operation_id,
+                    ArchitectureRoomActorKindV1::Human,
+                    &task_actor,
+                    ArchitectureRoomPayloadV1::Message {
+                        message: "The original product specification remains available for retry."
+                            .into(),
+                    },
+                );
+                let _ = ledger.transition(
+                    &operation_id,
+                    ArchitectureOperationStateV1::Failed,
+                    &error.body.message,
+                    &task_state.service_pubkey,
+                );
+            }
+        }
+    });
+}
+
+async fn get_architecture_operation(
+    State(state): State<Arc<ServiceState>>,
+    Path(operation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let operation = ArchitectureRoomLedger::open(&state.durability_dir)?.get(&operation_id)?;
+    capability(&state, &headers, &operation.repository_coordinate, "read")?;
+    Ok(Json(serde_json::to_value(operation).map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
             "SERVICE_NOT_READY",
             error.to_string(),
         )
-    })?
-    .map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "SERVICE_NOT_READY", error))?;
-    let verdict = match critic.get("verdict").and_then(Value::as_str) {
-        Some("approved") => CriticVerdictV1::Approved,
-        Some("changes_requested") => CriticVerdictV1::ChangesRequested,
-        _ => {
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "SERVICE_NOT_READY",
-                "critic returned an invalid verdict",
-            ))
-        }
-    };
-    let diagnostics = critic
-        .get("diagnostics")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
-    let reviewed = studio::record_critic_review(
-        &state.durability_dir,
-        &created.run_id,
-        &proposal_id,
-        &snapshot.revision.semantic_digest,
-        &format!("foundry-critic:{}", state.service_pubkey),
-        verdict,
-        diagnostics,
-        &format!("{operation}:critic"),
+    })?))
+}
+
+async fn list_architecture_operations(
+    State(state): State<Arc<ServiceState>>,
+    Query(query): Query<OperationListQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    capability(&state, &headers, &query.repository, "read")?;
+    let operations = ArchitectureRoomLedger::open(&state.durability_dir)?
+        .list_for_repository(&query.repository)?;
+    Ok(Json(json!({
+        "protocol_version": 1,
+        "operations": operations,
+    })))
+}
+
+async fn list_architecture_room_events(
+    State(state): State<Arc<ServiceState>>,
+    Path(operation_id): Path<String>,
+    Query(query): Query<RoomEventsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let operation = ledger.get(&operation_id)?;
+    capability(&state, &headers, &operation.repository_coordinate, "read")?;
+    let events = ledger.events(&operation_id, query.after, query.limit)?;
+    Ok(Json(json!({
+        "protocol_version": 1,
+        "operation_id": operation_id,
+        "events": events,
+    })))
+}
+
+async fn submit_architecture_guidance(
+    State(state): State<Arc<ServiceState>>,
+    Path(operation_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ArchitectureGuidanceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let operation = ledger.get(&operation_id)?;
+    let capability = capability(&state, &headers, &operation.repository_coordinate, "edit")?;
+    let _admitted = ledger.submit_guidance(
+        &operation_id,
+        &request.message_id,
+        request.mode,
+        GuidanceDeliveryV1::Queued,
+        &request.content,
+        &capability.actor_pubkey,
     )?;
-    Ok(Json(projection(&state, &capability, reviewed)))
+    let can_steer = matches!(
+        operation.state,
+        ArchitectureOperationStateV1::Architecting | ArchitectureOperationStateV1::Repairing
+    );
+    let requested_immediate = request.mode == GuidanceModeV1::Immediate && can_steer;
+    let runtime = Arc::clone(&state.architect_runtime);
+    let job_id = operation.architect_job_id.clone();
+    let message_id = request.message_id.clone();
+    let content = request.content.clone();
+    let delivery = if can_steer {
+        tokio::task::spawn_blocking(move || {
+            runtime.guide(&job_id, &message_id, &content, requested_immediate)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(AgentGuidanceDeliveryV2::Checkpointed)
+    } else {
+        AgentGuidanceDeliveryV2::Checkpointed
+    };
+    let delivery = match delivery {
+        AgentGuidanceDeliveryV2::Queued => GuidanceDeliveryV1::Queued,
+        AgentGuidanceDeliveryV2::Delivered => GuidanceDeliveryV1::Delivered,
+        AgentGuidanceDeliveryV2::Checkpointed => GuidanceDeliveryV1::Checkpointed,
+        AgentGuidanceDeliveryV2::Rejected => GuidanceDeliveryV1::Rejected,
+    };
+    let event = ledger.append_external_event(
+        &operation_id,
+        &format!("guidance-delivery:{}:{delivery:?}", request.message_id),
+        ArchitectureRoomActorKindV1::Human,
+        &capability.actor_pubkey,
+        ArchitectureRoomPayloadV1::HumanGuidance {
+            message_id: request.message_id,
+            mode: request.mode,
+            delivery,
+            content: request.content,
+        },
+    )?;
+    Ok(Json(serde_json::to_value(event).map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SERVICE_NOT_READY",
+            error.to_string(),
+        )
+    })?))
+}
+
+async fn cancel_architecture_operation(
+    State(state): State<Arc<ServiceState>>,
+    Path(operation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    operation_key(&headers)?;
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let operation = ledger.get(&operation_id)?;
+    capability(&state, &headers, &operation.repository_coordinate, "edit")?;
+    let cancelled = ledger.transition(
+        &operation_id,
+        ArchitectureOperationStateV1::Cancelled,
+        "Architecture operation cancelled by a repository editor",
+        &state.service_pubkey,
+    )?;
+    let runtime = if operation.state == ArchitectureOperationStateV1::CriticReview {
+        Arc::clone(&state.critic_runtime)
+    } else {
+        Arc::clone(&state.architect_runtime)
+    };
+    let job_id = if operation.state == ArchitectureOperationStateV1::CriticReview {
+        operation.critic_job_id
+    } else {
+        Some(operation.architect_job_id)
+    };
+    if let Some(job_id) = job_id {
+        let _ = tokio::task::spawn_blocking(move || runtime.cancel(&job_id)).await;
+    }
+    Ok(Json(serde_json::to_value(cancelled).map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SERVICE_NOT_READY",
+            error.to_string(),
+        )
+    })?))
+}
+
+async fn answer_architecture_question(
+    State(state): State<Arc<ServiceState>>,
+    Path(operation_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ArchitectureQuestionAnswerRequest>,
+) -> Result<Json<Value>, ApiError> {
+    operation_key(&headers)?;
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let operation = ledger.get(&operation_id)?;
+    let capability = capability(&state, &headers, &operation.repository_coordinate, "edit")?;
+    ledger.submit_guidance(
+        &operation_id,
+        &request.message_id,
+        GuidanceModeV1::Checkpoint,
+        GuidanceDeliveryV1::Delivered,
+        &request.content,
+        &capability.actor_pubkey,
+    )?;
+    let recovered =
+        ledger.answer_question(&operation_id, &request.question_id, &state.service_pubkey)?;
+    let mut architect_request: ArchitectStudioRequest = serde_json::from_value(recovered.request)
+        .map_err(|error| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_NOT_READY",
+            format!("persisted architecture request is invalid: {error}"),
+        )
+    })?;
+    architect_request.policy_constraints.push(format!(
+        "Human answer to question {}: {}",
+        request.question_id, request.content
+    ));
+    spawn_architecture_operation(
+        Arc::clone(&state),
+        operation_id,
+        capability,
+        architect_request,
+        format!(
+            "{}:answer:{}",
+            recovered.idempotency_key, request.message_id
+        ),
+    );
+    Ok(Json(json!({"accepted": true})))
+}
+
+async fn stream_architecture_room_events(
+    State(state): State<Arc<ServiceState>>,
+    Path(operation_id): Path<String>,
+    Query(query): Query<RoomEventsQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let operation = ledger.get(&operation_id)?;
+    capability(&state, &headers, &operation.repository_coordinate, "read")?;
+    let stream = futures::stream::unfold(
+        (state, operation_id, query.after, false),
+        |(state, operation_id, cursor, finished)| async move {
+            if finished {
+                return None;
+            }
+            let ledger = match ArchitectureRoomLedger::open(&state.durability_dir) {
+                Ok(ledger) => ledger,
+                Err(error) => {
+                    let event = SseEvent::default()
+                        .event("foundry-architecture-room")
+                        .json_data(
+                            json!({"code": "SERVICE_NOT_READY", "message": error.to_string()}),
+                        )
+                        .unwrap_or_else(|_| SseEvent::default().event("foundry-architecture-room"));
+                    return Some((Ok(event), (state, operation_id, cursor, true)));
+                }
+            };
+            let events = ledger.events(&operation_id, cursor, 1).unwrap_or_default();
+            if let Some(room_event) = events.into_iter().next() {
+                let next_cursor = room_event.sequence;
+                let terminal = ledger
+                    .get(&operation_id)
+                    .map(|operation| operation.state.terminal())
+                    .unwrap_or(true);
+                let no_more = ledger
+                    .events(&operation_id, next_cursor, 1)
+                    .map(|events| events.is_empty())
+                    .unwrap_or(true);
+                let event = SseEvent::default()
+                    .id(next_cursor.to_string())
+                    .event("foundry-architecture-room")
+                    .json_data(room_event)
+                    .unwrap_or_else(|_| SseEvent::default().event("foundry-architecture-room"));
+                return Some((
+                    Ok(event),
+                    (state, operation_id, next_cursor, terminal && no_more),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            Some((
+                Ok(SseEvent::default().comment("waiting")),
+                (state, operation_id, cursor, false),
+            ))
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn discover_studio(
@@ -1667,10 +2455,11 @@ async fn generate_revision(
         ));
     }
     let operation = operation_key(&headers)?.to_owned();
+    let operation_file_key = format!("{:x}", sha2::Sha256::digest(operation.as_bytes()));
     let output = state
         .durability_dir
         .join("agent-candidates")
-        .join(format!("{operation}.json"));
+        .join(format!("{operation_file_key}.json"));
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             ApiError::new(
@@ -1710,13 +2499,14 @@ async fn generate_revision(
         ],
         existing_ir: Some(current.ir.clone()),
     };
-    let architect_url = state.worker_url.clone();
-    let architect_token = state.worker_token.clone();
+    let architect_runtime = Arc::clone(&state.architect_runtime);
+    let architect_run_id = run_id.clone();
     let output_for_agent = output.clone();
     let candidate = tokio::task::spawn_blocking(move || {
-        let agent = crate::architect::WorkerArchitectureAgent {
-            base: &architect_url,
-            token: &architect_token,
+        let agent = crate::architect::RuntimeArchitectureAgent {
+            runtime: architect_runtime.as_ref(),
+            run_id: &architect_run_id,
+            event_sink: None,
         };
         crate::architect::architect(&agent, &architecture_request, &output_for_agent)
     })
@@ -1751,23 +2541,28 @@ async fn generate_revision(
         &operation,
     )?;
 
-    let critic_url = state.critic_url.clone();
-    let critic_token = state.critic_token.clone();
+    let critic_runtime = Arc::clone(&state.critic_runtime);
+    let critic_run_id = run_id.clone();
+    let critic_job_id = format!(
+        "studio-critic-{:x}",
+        sha2::Sha256::digest(format!("{run_id}:{}", next.revision.semantic_digest))
+    );
     let critic_payload = json!({
         "protocol_version": 1,
-        "job_id": format!("studio-critic-{}", next.revision.semantic_digest),
+        "job_id": &critic_job_id,
         "ir": &next.ir,
         "semantic_digest": &next.revision.semantic_digest,
         "rationale": &next.rationale,
         "locks": &next.locks,
     });
     let critic = tokio::task::spawn_blocking(move || {
-        crate::http::http_post_json(
-            &critic_url,
-            "/architecture-review",
-            &critic_payload,
-            &critic_token,
-        )
+        critic_runtime.execute(&AgentJobRequestV1::new(
+            critic_job_id,
+            critic_run_id,
+            AgentRoleV1::Critic,
+            "architecture_review",
+            critic_payload,
+        ))
     })
     .await
     .map_err(|error| {
@@ -2295,6 +3090,29 @@ fn required_arg(args: &[String], flag: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required {flag}"))
 }
 
+fn optional_arg(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|argument| argument == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+fn pi_pool_identity(url: &str, token: &str) -> String {
+    format!("pi-pool:{url}:{:x}", sha2::Sha256::digest(token))
+}
+
+fn buzz_runtime(role: &str, args: &[String]) -> Result<Arc<dyn AgentRuntime>, String> {
+    let gateway = required_arg(args, "--buzz-acp-gateway")?;
+    let upper_role = role.to_ascii_uppercase();
+    let capability = std::env::var(format!("FOUNDRY_BUZZ_{upper_role}_CAPABILITY"))
+        .map_err(|_| format!("FOUNDRY_BUZZ_{upper_role}_CAPABILITY is required"))?;
+    let agent_id = std::env::var(format!("FOUNDRY_BUZZ_{upper_role}_AGENT_ID"))
+        .map_err(|_| format!("FOUNDRY_BUZZ_{upper_role}_AGENT_ID is required"))?;
+    Ok(Arc::new(BuzzAcpAgentRuntime::new(
+        gateway, capability, agent_id,
+    )?))
+}
+
 pub fn serve(args: &[String]) -> Result<(), String> {
     let listen = required_arg(args, "--listen")?
         .parse::<SocketAddr>()
@@ -2325,10 +3143,32 @@ pub fn serve(args: &[String]) -> Result<(), String> {
     let worker_url = required_arg(args, "--pi-pool")?;
     let worker_token = std::env::var("FOUNDRY_WORKER_TOKEN")
         .map_err(|_| "FOUNDRY_WORKER_TOKEN is required".to_string())?;
-    let critic_url = required_arg(args, "--critic-pool")?;
-    let critic_token = std::env::var("FOUNDRY_CRITIC_TOKEN")
-        .map_err(|_| "FOUNDRY_CRITIC_TOKEN is required".to_string())?;
-    if worker_token == critic_token && worker_url == critic_url {
+    let architect_runtime: Arc<dyn AgentRuntime> =
+        match optional_arg(args, "--architect-runtime").as_deref() {
+            None | Some("pi-pool") => Arc::new(PiPoolAgentRuntime::new(
+                worker_url.clone(),
+                worker_token.clone(),
+                pi_pool_identity(&worker_url, &worker_token),
+            )),
+            Some("buzz-acp") => buzz_runtime("architect", args)?,
+            Some(other) => return Err(format!("unsupported --architect-runtime {other}")),
+        };
+    let critic_runtime: Arc<dyn AgentRuntime> =
+        match optional_arg(args, "--critic-runtime").as_deref() {
+            None | Some("pi-pool") => {
+                let critic_url = required_arg(args, "--critic-pool")?;
+                let critic_token = std::env::var("FOUNDRY_CRITIC_TOKEN")
+                    .map_err(|_| "FOUNDRY_CRITIC_TOKEN is required".to_string())?;
+                Arc::new(PiPoolAgentRuntime::new(
+                    critic_url.clone(),
+                    critic_token.clone(),
+                    pi_pool_identity(&critic_url, &critic_token),
+                ))
+            }
+            Some("buzz-acp") => buzz_runtime("critic", args)?,
+            Some(other) => return Err(format!("unsupported --critic-runtime {other}")),
+        };
+    if architect_runtime.identity() == critic_runtime.identity() {
         return Err("architect and critic must use independent configured identities".into());
     }
     let policy = Policy {
@@ -2359,8 +3199,8 @@ pub fn serve(args: &[String]) -> Result<(), String> {
         repository_paths: Arc::new(repository_paths),
         worker_url,
         worker_token,
-        critic_url,
-        critic_token,
+        architect_runtime,
+        critic_runtime,
         policy: Arc::new(policy),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         nip98_replays: Arc::new(Mutex::new(HashMap::new())),
@@ -2379,11 +3219,43 @@ pub fn serve(args: &[String]) -> Result<(), String> {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(2 * 1024 * 1024);
+    let recoverable_operations = ArchitectureRoomLedger::open(&state.durability_dir)
+        .and_then(|ledger| ledger.recoverable())
+        .map_err(|error| error.to_string())?;
     let router = Router::new()
         .route("/v1/studio/readiness", get(readiness))
         .route("/v1/studio/session", post(exchange_session))
         .route("/v1/studios", post(create_studio))
         .route("/v1/studios/architect", post(architect_studio))
+        .route(
+            "/v1/studio-operations/architect",
+            post(submit_architecture_operation),
+        )
+        .route("/v1/studio-operations", get(list_architecture_operations))
+        .route(
+            "/v1/studio-operations/{operation_id}",
+            get(get_architecture_operation),
+        )
+        .route(
+            "/v1/studio-operations/{operation_id}/room",
+            get(list_architecture_room_events),
+        )
+        .route(
+            "/v1/studio-operations/{operation_id}/messages",
+            post(submit_architecture_guidance),
+        )
+        .route(
+            "/v1/studio-operations/{operation_id}/answers",
+            post(answer_architecture_question),
+        )
+        .route(
+            "/v1/studio-operations/{operation_id}/cancel",
+            post(cancel_architecture_operation),
+        )
+        .route(
+            "/v1/studio-operations/{operation_id}/events",
+            get(stream_architecture_room_events),
+        )
         .route("/v1/studios/discover", get(discover_studio))
         .route(
             "/v1/studios/{run_id}/proposals/{proposal_id}",
@@ -2437,6 +3309,44 @@ pub fn serve(args: &[String]) -> Result<(), String> {
         .with_state(state.clone());
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async move {
+        for recovered in recoverable_operations {
+            let request: ArchitectStudioRequest = match serde_json::from_value(recovered.request) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ =
+                        ArchitectureRoomLedger::open(&state.durability_dir).and_then(|ledger| {
+                            ledger.transition(
+                                &recovered.operation.operation_id,
+                                ArchitectureOperationStateV1::Indeterminate,
+                                &format!("persisted architecture request is invalid: {error}"),
+                                &state.service_pubkey,
+                            )
+                        });
+                    continue;
+                }
+            };
+            let capability = Capability {
+                community_id: state.community_id.clone(),
+                repository_coordinate: recovered.operation.repository_coordinate.clone(),
+                actor_pubkey: recovered.operation.actor_id.clone(),
+                operations: recovered
+                    .operation
+                    .permitted_operations
+                    .iter()
+                    .cloned()
+                    .collect(),
+                expires_at: u64::MAX,
+                human: recovered.operation.human_actor,
+                approval_threshold: recovered.operation.approval_threshold,
+            };
+            spawn_architecture_operation(
+                Arc::clone(&state),
+                recovered.operation.operation_id,
+                capability,
+                request,
+                recovered.idempotency_key,
+            );
+        }
         for handoff in handoffs_to_recover {
             tokio::spawn(monitor_build(state.clone(), handoff));
         }
@@ -2466,8 +3376,16 @@ mod tests {
             repository_paths: Arc::new(HashMap::new()),
             worker_url: "http://127.0.0.1:8787".into(),
             worker_token: "worker".into(),
-            critic_url: "http://127.0.0.1:8788".into(),
-            critic_token: "critic".into(),
+            architect_runtime: Arc::new(PiPoolAgentRuntime::new(
+                "http://127.0.0.1:8787".into(),
+                "worker".into(),
+                "test-architect",
+            )),
+            critic_runtime: Arc::new(PiPoolAgentRuntime::new(
+                "http://127.0.0.1:8788".into(),
+                "critic".into(),
+                "test-critic",
+            )),
             policy: Arc::new(Policy::default()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             nip98_replays: Arc::new(Mutex::new(HashMap::new())),
