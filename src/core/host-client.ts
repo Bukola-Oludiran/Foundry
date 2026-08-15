@@ -40,7 +40,10 @@ export class SubprocessRunner implements CommandRunner {
       const stderr: Buffer[] = [];
       child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-      child.once("error", reject);
+      child.once("error", (error) => {
+        if (options.signal?.aborted) reject(new HostCommandError("REQUEST_CANCELLED", "Foundry request was cancelled", options.signal.reason));
+        else reject(error);
+      });
       child.once("close", (code) => resolveResult({ code: code ?? 1, stdout: Buffer.concat(stdout).toString("utf8").trim(), stderr: Buffer.concat(stderr).toString("utf8").trim() }));
     });
   }
@@ -101,13 +104,15 @@ export class RustSidecarRunner implements CommandRunner {
     const [operation, ...parameters] = args;
     if (!operation || !SIDECAR_OPERATIONS.has(operation)) return Promise.reject(new HostCommandError("INVALID_OPERATION", "Foundry sidecar operation is not allowed"));
     if (!options.cwd) return Promise.reject(new HostCommandError("INVALID_CWD", "Foundry sidecar requires a working directory"));
-    if (options.signal?.aborted) return Promise.reject(options.signal.reason ?? new Error("operation aborted"));
+    if (options.signal?.aborted) return Promise.reject(new HostCommandError("REQUEST_CANCELLED", "Foundry request was cancelled", options.signal.reason));
     const id = randomUUID();
     const child = this.start();
     return new Promise<CommandExecution>((resolveRequest, reject) => {
       const abort = (): void => {
         this.pending.delete(id);
-        reject(options.signal?.reason ?? new Error("operation aborted"));
+        const cancellation = JSON.stringify({ protocol_version: 1, id: randomUUID(), method: "cancel_execution", params: { request_id: id } });
+        if (this.child === child && child.exitCode === null && !child.stdin.destroyed) child.stdin.write(`${cancellation}\n`, () => undefined);
+        reject(new HostCommandError("REQUEST_CANCELLED", "Foundry request was cancelled", options.signal?.reason));
       };
       options.signal?.addEventListener("abort", abort, { once: true });
       this.pending.set(id, {

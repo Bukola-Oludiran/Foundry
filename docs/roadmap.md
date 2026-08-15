@@ -102,9 +102,11 @@ Status: first durable-host façade implemented; richer project authoring remains
 - Implemented: a versioned, allowlisted JSON-lines Rust sidecar with structured run, status, and
   publication results; the MCP client supervises and restarts it without introducing another
   persistence authority.
-- Remaining: cancellation propagation from MCP transport to child processes, Claude Code
-  certification, richer architecture project resources, and the separately versioned recursive
-  product IR.
+- Implemented: MCP abort signals use correlated sidecar cancellation messages to terminate the
+  matching active host command. This transport cleanup is intentionally separate from durable run
+  cancellation, which remains an explicit, monotonic GraphReact operation.
+- Remaining: Claude Code certification, richer architecture project resources, and the separately
+  versioned recursive product IR.
 
 ## Deferred
 

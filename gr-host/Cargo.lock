@@ -427,6 +427,7 @@ dependencies = [
  "graphreact-core",
  "graphreact-durable-runtime",
  "graphreact-persistence",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.10.9",

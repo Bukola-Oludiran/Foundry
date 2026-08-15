@@ -112,5 +112,6 @@ environment-only; they are never accepted as tool arguments.
 
 MCP uses the host's versioned JSON-lines sidecar by default. The sidecar accepts only the seven
 declared operations, returns structured run/status/publication fields, and restarts on the next
-request after an unexpected exit. `FOUNDRY_HOST_TRANSPORT=direct` is available only as a
-development diagnostic fallback.
+request after an unexpected exit. MCP request aborts are correlated to the active sidecar command
+and terminate that command; they do not replace the durable `foundry_cancel` operation for stopping
+a run. `FOUNDRY_HOST_TRANSPORT=direct` is available only as a development diagnostic fallback.

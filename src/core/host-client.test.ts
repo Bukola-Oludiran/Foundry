@@ -59,3 +59,15 @@ test("structured sidecar transport restarts after an unexpected child exit", asy
   assert.deepEqual(second.state, { command: "validate", structured: true });
   await runner.close();
 });
+
+test("abort signals cancel the matching active sidecar command", async () => {
+  const root = mkdtempSync(join(tmpdir(), "foundry-sidecar-cancel-"));
+  const runner = new RustSidecarRunner(process.execPath, [resolve("src/core/fake-cancellable-sidecar.mjs")]);
+  const controller = new AbortController();
+  const build = runner.run(["build", "--ir", "accepted.ir.json"], { cwd: root, signal: controller.signal });
+  controller.abort("client disconnected");
+  await assert.rejects(build, (error: any) => error.code === "REQUEST_CANCELLED");
+  const probe = await runner.run(["status", "--run", "run-one"], { cwd: root });
+  assert.equal(probe.state?.matchedCancellation, true);
+  await runner.close();
+});
