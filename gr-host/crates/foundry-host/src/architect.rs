@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use foundry_ir::{compile, validate_architecture_request, ArchitectureRequest, Ir};
+use foundry_ir::{
+    compile, validate_architecture_request, validate_revision, ArchitectureRequest,
+    ArchitectureRevisionRequest, Ir, StructuralDiff,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -129,6 +132,89 @@ pub fn architect(
     ))
 }
 
+pub fn revise(
+    agent: &dyn ArchitectureAgent,
+    accepted: &Ir,
+    revision: &ArchitectureRevisionRequest,
+    repository: &str,
+    base_revision: &str,
+    output: &Path,
+) -> Result<(Ir, StructuralDiff), String> {
+    let mut languages: Vec<String> = accepted
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.implementation
+                .language
+                .clone()
+                .or_else(|| accepted.spec.language.clone())
+        })
+        .collect();
+    languages.sort();
+    languages.dedup();
+    let request = ArchitectureRequest {
+        architecture_version: 1,
+        product_spec: format!(
+            "Revise ownership subtree `{}` because: {}",
+            revision.target_node, revision.reason
+        ),
+        repository: repository.to_owned(),
+        base_revision: base_revision.to_owned(),
+        allowed_languages: languages,
+        policy_constraints: vec![
+            format!(
+                "Preserve this exact boundary interface: {}",
+                serde_json::to_string(&revision.boundary_interface).map_err(|e| e.to_string())?
+            ),
+            format!(
+                "Failure history: {}",
+                serde_json::to_string(&revision.failure_history).map_err(|e| e.to_string())?
+            ),
+            "Change only the compiler-calculated target blast radius".into(),
+        ],
+        existing_ir: Some(accepted.clone()),
+    };
+    let mut diagnostics = Vec::new();
+    for attempt in 1..=MAX_ARCHITECT_ATTEMPTS {
+        let (proposal, rationale) = agent.propose(&request, attempt, &diagnostics)?;
+        let proposed: Ir = match serde_json::from_value(proposal) {
+            Ok(ir) => ir,
+            Err(error) => {
+                diagnostics = vec![format!("IR JSON contract violation: {error}")];
+                continue;
+            }
+        };
+        match validate_revision(accepted, &proposed, revision) {
+            Ok(diff) => {
+                std::fs::write(
+                    output,
+                    serde_json::to_vec_pretty(&proposed).map_err(|e| e.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                std::fs::write(
+                    output.with_extension(format!(
+                        "{}.rationale.md",
+                        output
+                            .extension()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("ir")
+                    )),
+                    rationale,
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok((proposed, diff));
+            }
+            Err(errors) => {
+                diagnostics = errors.into_iter().map(|error| error.to_string()).collect();
+            }
+        }
+    }
+    Err(format!(
+        "revision remained invalid after {MAX_ARCHITECT_ATTEMPTS} attempts:\n{}",
+        diagnostics.join("\n")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -176,6 +262,54 @@ mod tests {
         let built = architect(&agent, &request, &output).unwrap();
         assert_eq!(built.ir_version, 1);
         assert!(output.is_file());
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(output.with_extension("json.rationale.md"));
+    }
+
+    #[test]
+    fn out_of_scope_revision_is_repaired_before_output() {
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../ir/examples/string-utils.ir.json");
+        let accepted: Ir = serde_json::from_slice(&std::fs::read(example).unwrap()).unwrap();
+        let mut invalid = accepted.clone();
+        invalid
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "trim")
+            .unwrap()
+            .implementation
+            .write_target = "src/out-of-scope.py".into();
+        let mut valid = accepted.clone();
+        valid
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "hyphenate")
+            .unwrap()
+            .implementation
+            .write_target = "src/hyphenate-v2.py".into();
+        let target = accepted
+            .nodes
+            .iter()
+            .find(|node| node.id == "hyphenate")
+            .unwrap();
+        let request = ArchitectureRevisionRequest {
+            revision_version: 1,
+            accepted_ir_revision: foundry_ir::ir_digest(&accepted),
+            target_node: target.id.clone(),
+            reason: "failed acceptance".into(),
+            failure_history: vec!["collapse failed".into()],
+            boundary_interface: target.provides.clone(),
+        };
+        let agent = RepairingAgent {
+            proposals: Mutex::new(vec![
+                serde_json::to_value(invalid).unwrap(),
+                serde_json::to_value(valid).unwrap(),
+            ]),
+        };
+        let output =
+            std::env::temp_dir().join(format!("foundry-revision-{}.json", std::process::id()));
+        let (_, diff) = revise(&agent, &accepted, &request, ".", "HEAD", &output).unwrap();
+        assert_eq!(diff.replaced_nodes, ["hyphenate"]);
         let _ = std::fs::remove_file(&output);
         let _ = std::fs::remove_file(output.with_extension("json.rationale.md"));
     }

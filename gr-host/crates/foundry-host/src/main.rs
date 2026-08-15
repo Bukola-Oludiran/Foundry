@@ -353,7 +353,6 @@ fn main() {
             })
         };
         let accepted = read_ir(&accepted_path);
-        let proposed = read_ir(&proposal_path);
         let Some(target) = accepted.nodes.iter().find(|node| node.id == target_node) else {
             eprintln!("unknown revision target `{target_node}`");
             std::process::exit(1);
@@ -363,15 +362,55 @@ fn main() {
             accepted_ir_revision: foundry_ir::ir_digest(&accepted),
             target_node,
             reason,
-            failure_history: Vec::new(),
+            failure_history: arg(&args, "--failure-history")
+                .map(|path| {
+                    std::fs::read_to_string(path)
+                        .unwrap_or_else(|error| {
+                            eprintln!("read failure history: {error}");
+                            std::process::exit(1);
+                        })
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             boundary_interface: target.provides.clone(),
         };
-        let diff = foundry_ir::validate_revision(&accepted, &proposed, &request).unwrap_or_else(
-            |errors| {
-                errors.iter().for_each(|error| eprintln!("- {error}"));
+        let (proposed, diff) = if has_flag(&args, "--generate") {
+            let repository = required("--repo");
+            let base_revision = required("--base");
+            let worker_base =
+                arg(&args, "--pi-pool").unwrap_or_else(|| "http://127.0.0.1:8787".into());
+            let token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
+                eprintln!("FOUNDRY_WORKER_TOKEN is required");
+                std::process::exit(2);
+            });
+            let agent = architect::WorkerArchitectureAgent {
+                base: &worker_base,
+                token: &token,
+            };
+            architect::revise(
+                &agent,
+                &accepted,
+                &request,
+                &repository,
+                &base_revision,
+                std::path::Path::new(&proposal_path),
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("revision generation failed: {error}");
                 std::process::exit(1);
-            },
-        );
+            })
+        } else {
+            let proposed = read_ir(&proposal_path);
+            let diff = foundry_ir::validate_revision(&accepted, &proposed, &request)
+                .unwrap_or_else(|errors| {
+                    errors.iter().for_each(|error| eprintln!("- {error}"));
+                    std::process::exit(1);
+                });
+            (proposed, diff)
+        };
         std::fs::write(
             &output,
             serde_json::to_vec_pretty(&diff).expect("diff serialization cannot fail"),

@@ -66,8 +66,11 @@ Status: in progress; the versioned boundary and structural-diff validator are im
   durably rebuilds only the replacement and transitive consumers, restricts the final diff to that
   closure, and atomically promotes the IR only after the scoped run reaches green. Failed proposals
   leave the accepted IR untouched and keep their diagnostics/artifacts in the run store.
-- Remaining: have the architecture worker produce the revision proposal directly from the
-  versioned failure request and add the full sibling-byte-identity end-to-end fixture.
+- Implemented generation: `rearchitect --generate` sends the accepted IR, exact boundary, reason,
+  and persisted failure history to the architecture worker; out-of-scope proposals receive exact
+  revision diagnostics in the bounded repair loop and are never staged.
+- Remaining: add the full sibling-byte-identity end-to-end fixture across generation, rebuild, and
+  promotion.
 
 ## M6 — Git review delivery
 
