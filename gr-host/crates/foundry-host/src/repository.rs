@@ -74,6 +74,14 @@ fn stdout(command: &mut Command) -> Result<String, String> {
     output(command).map(|result| String::from_utf8_lossy(&result.stdout).trim().to_owned())
 }
 
+pub fn git_revision(repository: &Path, revision: &str) -> Result<String, String> {
+    stdout(
+        Command::new("git")
+            .args(["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
+            .current_dir(repository),
+    )
+}
+
 fn safe_run_id(run_id: &str) -> Result<String, String> {
     if run_id.is_empty()
         || run_id.len() > 128

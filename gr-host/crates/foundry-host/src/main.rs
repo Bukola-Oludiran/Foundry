@@ -19,7 +19,7 @@ mod http;
 mod repository;
 use http::http_post_json;
 use repository::{
-    DiffPolicy, GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher,
+    git_revision, DiffPolicy, GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher,
     RepositoryProvider,
 };
 
@@ -527,16 +527,48 @@ fn main() {
             std::process::exit(1);
         }
         let base_branch = arg(&args, "--base").unwrap_or_else(|| "main".into());
-        let summary = arg(&args, "--summary")
-            .map(|path| std::fs::read_to_string(path).unwrap_or_else(|error| {
-                eprintln!("read review summary: {error}");
+        let ir_path = arg(&args, "--ir").unwrap_or_else(|| {
+            eprintln!("publish requires --ir to bind the review to an accepted architecture");
+            std::process::exit(2);
+        });
+        let ir: Ir = serde_json::from_slice(&std::fs::read(&ir_path).unwrap_or_else(|error| {
+            eprintln!("read {ir_path}: {error}");
+            std::process::exit(1);
+        }))
+        .unwrap_or_else(|error| {
+            eprintln!("parse {ir_path}: {error}");
+            std::process::exit(1);
+        });
+        let repository_path = std::path::Path::new(&repository);
+        let base_commit = git_revision(repository_path, &base_branch).unwrap_or_else(|error| {
+            eprintln!("resolve base commit: {error}");
+            std::process::exit(1);
+        });
+        let head_commit = git_revision(repository_path, &format!("foundry/{run_id}"))
+            .unwrap_or_else(|error| {
+                eprintln!("resolve Foundry head commit: {error}");
                 std::process::exit(1);
-            }))
-            .unwrap_or_else(|| {
-                format!(
-                    "## Foundry build\n\n- Durable run: `{run_id}`\n- Human review and merge are required.\n\n## Residual risks\n\nSee attached run artifacts and test evidence before approval."
-                )
             });
+        let operator_summary = arg(&args, "--summary")
+            .map(|path| {
+                std::fs::read_to_string(path).unwrap_or_else(|error| {
+                    eprintln!("read review summary: {error}");
+                    std::process::exit(1);
+                })
+            })
+            .unwrap_or_default();
+        let evidence = durable::review_evidence(std::path::Path::new(&durability_dir), &run_id)
+            .unwrap_or_else(|error| {
+                eprintln!("read durable evidence: {error}");
+                std::process::exit(1);
+            });
+        let summary = format!(
+            "## Foundry build\n\n- Specification: `{}`\n- Accepted IR revision: `{}`\n- Base commit: `{base_commit}`\n- Head commit: `{head_commit}`\n\n{}\n{}\n## Residual risks\n\nHuman review and merge are required. Review all durable artifacts before approval.\n",
+            ir.spec.name,
+            foundry_ir::ir_digest(&ir),
+            operator_summary,
+            evidence,
+        );
         let publisher = GitHubRepositoryProvider;
         let url = publisher
             .publish_draft(

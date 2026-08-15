@@ -13,9 +13,9 @@ use graphreact_core::{
     RestartTracker, Scheduler, SuperviseDecision, Supervisor,
 };
 use graphreact_durable_runtime::{
-    cancel_run, dispatch_pending_effects, enqueue_durable_message, get_run, install_local, recover,
-    write_runtime_snapshot, AdapterFuture, DurableEffectAdapter, EffectAdapterError,
-    EffectAdapterRegistry,
+    cancel_run, dispatch_pending_effects, enqueue_durable_message, get_run, install_local,
+    list_run_artifacts, recover, write_runtime_snapshot, AdapterFuture, DurableEffectAdapter,
+    EffectAdapterError, EffectAdapterRegistry,
 };
 use graphreact_persistence::{
     canonical_json_bytes, AttemptId, CorrelationId, DeploymentDigest, DeploymentId,
@@ -334,8 +334,7 @@ fn decode_digest(value: &str) -> Result<DeploymentDigest, String> {
     Ok(DeploymentDigest(bytes))
 }
 
-pub fn run_status(durability_dir: &Path, run_id: &str) -> Result<RunStatus, String> {
-    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+fn open_existing(durability_dir: &Path) -> Result<LocalPersistence, String> {
     let deployment_id = DeploymentId::parse(
         std::fs::read_to_string(durability_dir.join("deployment-id"))
             .map_err(|error| error.to_string())?
@@ -348,15 +347,60 @@ pub fn run_status(durability_dir: &Path, run_id: &str) -> Result<RunStatus, Stri
             .map_err(|error| error.to_string())?
             .trim(),
     )?;
-    let engine = LocalPersistence::open(graphreact_persistence::LocalConfig::new(
+    LocalPersistence::open(graphreact_persistence::LocalConfig::new(
         durability_dir,
         deployment_id,
         digest,
     ))
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())
+}
+
+pub fn run_status(durability_dir: &Path, run_id: &str) -> Result<RunStatus, String> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+    let engine = open_existing(durability_dir)?;
     block_on(get_run(&engine, &run_id))
         .map(|info| info.status)
         .map_err(|error| error.to_string())
+}
+
+pub fn review_evidence(durability_dir: &Path, run_id: &str) -> Result<String, String> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+    let engine = open_existing(durability_dir)?;
+    let info = block_on(get_run(&engine, &run_id)).map_err(|error| error.to_string())?;
+    let artifacts =
+        block_on(list_run_artifacts(&engine, &run_id)).map_err(|error| error.to_string())?;
+    let attempts = block_on(engine.replay(0))
+        .map_err(|error| error.to_string())?
+        .iter()
+        .filter(|record| {
+            matches!(record, RuntimeRecordV1::AttemptStarted { run_id: id, .. } if id == &run_id)
+        })
+        .count();
+    let mut summary = format!(
+        "## Durable run evidence\n\n- Run: `{run_id}`\n- Status: `{:?}`\n- Attempts: {attempts}\n- Durable artifacts: {}\n",
+        info.status,
+        artifacts.len()
+    );
+    if let Some(result) = info.result {
+        summary.push_str(&format!("- Terminal result: `{result}`\n"));
+    }
+    if !artifacts.is_empty() {
+        summary.push_str("\n### Artifacts\n\n");
+        for artifact in artifacts {
+            summary.push_str(&format!(
+                "- `{}` — `{}` — {} bytes — SHA-256 `{}`\n",
+                artifact.logical_name,
+                artifact.media_type,
+                artifact.size,
+                artifact
+                    .sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ));
+        }
+    }
+    Ok(summary)
 }
 
 fn unix_time_ms() -> u64 {

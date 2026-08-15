@@ -73,7 +73,7 @@ cargo run --manifest-path gr-host/Cargo.toml -- rearchitect \
 # to run only the calculated affected closure and promote the IR after a green durable run.
 cargo run --manifest-path gr-host/Cargo.toml -- publish \
   --run <durable-run-id> --durability-dir <run-store> \
-  --repo <worktree> --base main --draft-pr --summary review.md
+  --repo <worktree> --base main --ir accepted.ir.json --draft-pr --summary review.md
 ```
 
 `architect` calls the authenticated worker, retries invalid proposals with exact Rust compiler

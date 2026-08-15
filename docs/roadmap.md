@@ -81,8 +81,11 @@ Status: in progress; isolated worktrees, guarded commits, and draft-only publica
   fail-closed secret/symlink/binary/size checks.
 - Implemented: durable status verification before publication and idempotent GitHub draft lookup,
   push, and creation. There is deliberately no approve, merge, force-push, or base mutation path.
-- Remaining: generate the complete evidence-rich review summary from durable artifacts, bind Git
-  prepare/commit/publish themselves as durable effects, and add a GitHub fixture acceptance test.
+- Implemented review evidence: publication binds the specification, accepted IR digest, exact
+  base/head commits, terminal result, attempts, artifact names/media/sizes/hashes, operator notes,
+  and residual human-review risk in the draft body.
+- Remaining: bind Git prepare/commit/publish themselves as durable effects and add a GitHub fixture
+  acceptance test.
 
 ## Deferred
 
