@@ -32,7 +32,7 @@ use graphreact_core::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -384,6 +384,57 @@ fn main() {
             "valid scoped revision: rebuild {}",
             diff.rebuilt_nodes.join(" → ")
         );
+        if has_flag(&args, "--execute") {
+            let repository = required("--repo");
+            let workspace = required("--workspace");
+            let durability_dir = required("--durability-dir");
+            let promote = required("--promote");
+            let base_revision = required("--base");
+            let mut command =
+                std::process::Command::new(std::env::current_exe().unwrap_or_else(|error| {
+                    eprintln!("resolve Foundry executable: {error}");
+                    std::process::exit(1);
+                }));
+            command
+                .args(["build", "--ir", &proposal_path, "--repo", &repository])
+                .args([
+                    "--workspace",
+                    &workspace,
+                    "--durability-dir",
+                    &durability_dir,
+                ])
+                .args(["--base", &base_revision])
+                .args(["--only", &diff.rebuilt_nodes.join(",")]);
+            if let Some(worker) = arg(&args, "--pi-pool") {
+                command.args(["--pi-pool", &worker]);
+            }
+            let status = command.status().unwrap_or_else(|error| {
+                eprintln!("execute scoped revision: {error}");
+                std::process::exit(1);
+            });
+            if !status.success() {
+                eprintln!("proposed revision did not reach green; accepted IR remains active");
+                std::process::exit(1);
+            }
+            let promote_path = std::path::Path::new(&promote);
+            if let Some(parent) = promote_path.parent() {
+                std::fs::create_dir_all(parent).unwrap_or_else(|error| {
+                    eprintln!("prepare promotion path: {error}");
+                    std::process::exit(1);
+                });
+            }
+            let temporary = promote_path.with_extension(format!("tmp-{}", std::process::id()));
+            std::fs::write(
+                &temporary,
+                serde_json::to_vec_pretty(&proposed).expect("IR serialization cannot fail"),
+            )
+            .and_then(|()| std::fs::rename(&temporary, promote_path))
+            .unwrap_or_else(|error| {
+                eprintln!("promote green IR revision: {error}");
+                std::process::exit(1);
+            });
+            println!("promoted green IR revision to {promote}");
+        }
         return;
     }
     if args.get(1).is_some_and(|value| value == "cancel") {
@@ -503,9 +554,11 @@ fn main() {
         std::process::exit(1);
     });
     let ir_digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let only = arg(&args, "--only");
+    let scope_key = only.as_deref().unwrap_or("all");
     let run_digest = format!(
         "{:x}",
-        Sha256::digest(format!("{ir_digest}:{base_commit}").as_bytes())
+        Sha256::digest(format!("{ir_digest}:{base_commit}:{scope_key}").as_bytes())
     );
     let run_id = format!("run-{}", &run_digest[..16]);
     let attempt_path = std::path::Path::new(&workspace_root)
@@ -519,6 +572,21 @@ fn main() {
         }
         std::process::exit(1);
     });
+    let targets: BTreeMap<String, ()> = if let Some(only) = only {
+        only.split(',')
+            .map(str::trim)
+            .filter(|node| !node.is_empty())
+            .map(|node| {
+                if !plan.order.iter().any(|candidate| candidate == node) {
+                    eprintln!("--only contains unknown node `{node}`");
+                    std::process::exit(2);
+                }
+                (node.to_owned(), ())
+            })
+            .collect()
+    } else {
+        plan.order.iter().cloned().map(|node| (node, ())).collect()
+    };
     if has_flag(&args, "--dry-run") {
         println!("Foundry dry-run: {}", ir.spec.name);
         for (index, generation) in plan.generations.iter().enumerate() {
@@ -582,6 +650,7 @@ fn main() {
             &worker_token,
             durability_dir,
             &run_digest,
+            &targets,
         )
         .unwrap_or_else(|error| {
             eprintln!("durable build failed: {error}");
@@ -589,10 +658,9 @@ fn main() {
         });
         if let Some(worktree) = &run_worktree {
             let policy = DiffPolicy {
-                allowed_paths: plan
-                    .write_targets
-                    .values()
-                    .cloned()
+                allowed_paths: targets
+                    .keys()
+                    .filter_map(|node| plan.write_targets.get(node).cloned())
                     .collect::<BTreeSet<_>>(),
                 max_file_bytes: 4 * 1024 * 1024,
             };

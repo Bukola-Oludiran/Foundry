@@ -1,4 +1,4 @@
-.PHONY: install fmt fmt-check lint test test-local check
+.PHONY: install fmt fmt-check lint test test-local test-durable-restart check
 
 install:
 	npm ci --prefix pi-pool
@@ -22,5 +22,9 @@ test:
 test-local:
 	cargo test --manifest-path gr-host/Cargo.toml --workspace
 	npm run --prefix pi-pool test:local
+
+test-durable-restart:
+	cargo build --manifest-path gr-host/Cargo.toml --locked
+	npm run --prefix pi-pool validate:durable-restart
 
 check: fmt-check lint test

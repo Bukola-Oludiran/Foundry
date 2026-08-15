@@ -49,3 +49,22 @@ jobs:
         env:
           FOUNDRY_SANDBOX: oci
           FOUNDRY_ALLOW_ROOTFUL_OCI: "1"
+
+  durable-restart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: pi-pool/package-lock.json
+      - run: npm ci
+        working-directory: pi-pool
+      - run: cargo build --manifest-path gr-host/Cargo.toml --locked
+      - run: npm run validate:durable-restart
+        working-directory: pi-pool
+        env:
+          FOUNDRY_SANDBOX: oci
+          FOUNDRY_ALLOW_ROOTFUL_OCI: "1"

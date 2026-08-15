@@ -366,6 +366,30 @@ fn unix_time_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn crash_injection(point: &str) {
+    if std::env::var("FOUNDRY_CRASH_AT").ok().as_deref() != Some(point) {
+        return;
+    }
+    if let Ok(marker) = std::env::var("FOUNDRY_CRASH_MARKER") {
+        let marker = Path::new(&marker);
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match OpenOptions::new().create_new(true).write(true).open(marker) {
+            Ok(file) => {
+                let _ = file.sync_all();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
+            Err(error) => {
+                eprintln!("cannot create crash-injection marker: {error}");
+                std::process::exit(87);
+            }
+        }
+    }
+    eprintln!("intentional Foundry crash injection at `{point}`");
+    std::process::exit(86);
+}
+
 struct RunContext {
     run_id: RunId,
     attempt_id: AttemptId,
@@ -477,6 +501,7 @@ pub fn run(
     token: &str,
     durability_dir: PathBuf,
     idempotency_key: &str,
+    targets: &BTreeMap<String, ()>,
 ) -> Result<(), String> {
     debug_assert_eq!(MANAGER_DECISIONS.len(), 4);
     let mut definitions: HashMap<String, NodeDefinition> = jobs
@@ -556,6 +581,7 @@ pub fn run(
         .map_err(|error| error.to_string())?;
     let recovery =
         block_on(recover(&scheduler, engine.as_ref())).map_err(|error| error.to_string())?;
+    crash_injection("after_recovery");
     println!(
         "  recovery: {} records, {} pending messages",
         recovery.replayed_records, recovery.pending_messages
@@ -589,6 +615,7 @@ pub fn run(
     );
 
     loop {
+        crash_injection("before_activation");
         if cancellation_requested(&durability_dir, &run.run_id) {
             block_on(cancel_run(
                 &scheduler,
@@ -619,6 +646,8 @@ pub fn run(
         scheduler
             .process_batch()
             .map_err(|error| error.to_string())?;
+        crash_injection("after_activation");
+        crash_injection("before_effect_dispatch");
         let dispatched = block_on(dispatch_pending_effects(
             &scheduler,
             engine.as_ref(),
@@ -626,9 +655,11 @@ pub fn run(
             &registry,
         ))
         .map_err(|error| error.to_string())?;
+        crash_injection("after_effect_dispatch");
         scheduler
             .process_batch()
             .map_err(|error| error.to_string())?;
+        crash_injection("after_effect_result_application");
 
         let state = scheduler.snapshot_durable_state();
         let phases: BTreeMap<_, _> = plan
@@ -636,7 +667,10 @@ pub fn run(
             .iter()
             .map(|node_id| (node_id.clone(), phase(&state, node_id)))
             .collect();
-        if phases.values().all(|value| value == "green") {
+        if targets
+            .keys()
+            .all(|node| phases.get(node).is_some_and(|value| value == "green"))
+        {
             block_on(engine.commit(
                 FENCING_TOKEN,
                 &[RuntimeRecordV1::RunStatusChanged {
@@ -648,6 +682,7 @@ pub fn run(
                 }],
             ))
             .map_err(|error| error.to_string())?;
+            crash_injection("before_terminal_snapshot");
             block_on(write_runtime_snapshot(
                 &scheduler,
                 engine.as_ref(),
@@ -657,7 +692,11 @@ pub fn run(
             println!("✅ durable build: ALL GREEN");
             return Ok(());
         }
-        if let Some((node, _)) = phases.iter().find(|(_, value)| *value == "failed") {
+        if let Some((node, _)) = phases
+            .iter()
+            .filter(|(node, _)| targets.contains_key(*node))
+            .find(|(_, value)| *value == "failed")
+        {
             let detail = state
                 .nodes
                 .get(node)
@@ -698,13 +737,17 @@ pub fn run(
         };
         let mut scheduled = 0usize;
         for node_id in &plan.order {
+            if !targets.contains_key(node_id) {
+                continue;
+            }
             let current = phases.get(node_id).map(String::as_str).unwrap_or("pending");
             if !matches!(current, "pending" | "retry") || queued(node_id) {
                 continue;
             }
-            let ready = plan.dependencies[node_id]
-                .iter()
-                .all(|dependency| phases.get(dependency).is_some_and(|value| value == "green"));
+            let ready = plan.dependencies[node_id].iter().all(|dependency| {
+                !targets.contains_key(dependency)
+                    || phases.get(dependency).is_some_and(|value| value == "green")
+            });
             if ready {
                 enqueue_durable_message(
                     &scheduler,
@@ -718,6 +761,7 @@ pub fn run(
                     CorrelationId::new(),
                 )
                 .map_err(|error| error.to_string())?;
+                crash_injection("after_message_enqueue");
                 scheduled += 1;
             }
         }

@@ -36,8 +36,11 @@ Status: in progress; the crash-recovery execution slice is implemented.
 - Implemented cancellation slice: an idempotent filesystem request is accepted while the daemon is
   live or stopped, GraphReact records cancellation before closing run admission, and the worker has
   an authenticated cooperative cancellation endpoint. Existing artifacts are retained.
-- Remaining: process-level interruption of synchronous local/OCI runners, repository/worktree
-  effects, and the automated subprocess crash matrix.
+- Implemented crash acceptance: subprocess kills after activation, before/after effect dispatch,
+  after result application, and after the terminal commit all recover the same one-node run green.
+  This matrix runs in OCI isolation in CI.
+- Remaining: process-level interruption of synchronous local/OCI runners and binding repository/
+  worktree operations themselves as GraphReact durable effects.
 
 ## M4 — spec-to-IR architecture
 
@@ -59,8 +62,12 @@ Status: in progress; the versioned boundary and structural-diff validator are im
 - Implemented: accepted-revision digest binding, explicit target/reason/failure/boundary request,
   full proposed-IR compilation, stable target interface and parent mandate checks, out-of-scope
   byte-structural equality, affected consumer closure, and a persisted JSON structural diff.
-- Remaining: have the architecture worker produce revision proposals, stage them in fresh Git
-  worktrees, rebuild the affected closure, and atomically promote only a green revision.
+- Implemented execution: `rearchitect --execute` starts the proposal at an immutable Git base,
+  durably rebuilds only the replacement and transitive consumers, restricts the final diff to that
+  closure, and atomically promotes the IR only after the scoped run reaches green. Failed proposals
+  leave the accepted IR untouched and keep their diagnostics/artifacts in the run store.
+- Remaining: have the architecture worker produce the revision proposal directly from the
+  versioned failure request and add the full sibling-byte-identity end-to-end fixture.
 
 ## M6 — Git review delivery
 
