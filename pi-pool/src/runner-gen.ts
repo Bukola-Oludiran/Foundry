@@ -79,6 +79,85 @@ raise SystemExit(0 if not _failed else 1)
 `;
 }
 
+export function generateTypeScriptRunner(input: GenInput): string {
+  const { moduleImportName, opNames, cases } = input;
+  const casesB64 = Buffer.from(JSON.stringify(cases), "utf-8").toString(
+    "base64",
+  );
+  const bindings =
+    opNames.length > 0 ? `const { ${opNames.join(", ")} } = subject;` : "";
+  return `import * as subject from "./${moduleImportName}.ts";
+${bindings}
+const cases = JSON.parse(Buffer.from("${casesB64}", "base64").toString("utf8"));
+const results = [];
+for (const current of cases) {
+  const result = { case: current.name, expected: current.expect, actual: null, error: null, passed: false };
+  try {
+    const actual = await eval(current.call);
+    result.actual = actual;
+    result.passed = JSON.stringify(actual) === JSON.stringify(current.expect);
+  } catch (error) {
+    result.error = String(error?.stack ?? error);
+  }
+  results.push(result);
+}
+const failures = results.filter((result) => !result.passed);
+console.log("${VERDICT_SENTINEL}" + JSON.stringify({ passed: results.length - failures.length, failed: failures.length, failures }));
+process.exitCode = failures.length === 0 ? 0 : 1;
+`;
+}
+
+export function generateGoRunner(input: GenInput): string {
+  const cases = input.cases
+    .map((testCase, index) => {
+      const call = testCase.call ?? "nil";
+      const expected = JSON.stringify(JSON.stringify(testCase.expect));
+      const name = JSON.stringify(testCase.name);
+      return `
+    func() {
+        result := caseResult{Case: ${name}, Expected: json.RawMessage(${expected})}
+        func() {
+            defer func() { if recovered := recover(); recovered != nil { result.Error = fmt.Sprint(recovered) } }()
+            actual := ${call}
+            encoded, err := json.Marshal(actual)
+            if err != nil { result.Error = err.Error(); return }
+            result.Actual = encoded
+            result.Passed = string(encoded) == ${expected}
+        }()
+        results[${index}] = result
+    }()`;
+    })
+    .join("\n");
+  return `package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "os"
+)
+
+type caseResult struct {
+    Case string \`json:"case"\`
+    Expected json.RawMessage \`json:"expected"\`
+    Actual json.RawMessage \`json:"actual"\`
+    Error string \`json:"error"\`
+    Passed bool \`json:"passed"\`
+}
+
+func main() {
+    results := make([]caseResult, ${input.cases.length})
+${cases}
+    failures := make([]caseResult, 0)
+    passed := 0
+    for _, result := range results { if result.Passed { passed++ } else { failures = append(failures, result) } }
+    verdict := map[string]any{"passed": passed, "failed": len(failures), "failures": failures}
+    encoded, _ := json.Marshal(verdict)
+    fmt.Println("${VERDICT_SENTINEL}" + string(encoded))
+    if len(failures) > 0 { os.Exit(1) }
+}
+`;
+}
+
 /** Extract the verdict from a runner's stdout (the sentinel line). */
 export function parseVerdict(stdout: string): RunnerVerdict | null {
   for (const line of stdout.split("\n")) {

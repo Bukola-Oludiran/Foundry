@@ -16,7 +16,7 @@ Status: implemented; CI confirmation pending on the first pushed revision.
 
 ## M2 — secure polyglot worker plane
 
-Status: next.
+Status: implemented; CI confirmation pending on the first pushed revision.
 
 - Language backend registry for Python, TypeScript, and Go.
 - Bounded multi-turn doer loop.
@@ -26,7 +26,7 @@ Status: next.
 
 ## M3 — durable supervised builds
 
-Status: planned.
+Status: next.
 
 - One GraphReact local durable run per build.
 - Durable worker/Git effects, build artifacts, cancellation, and restart recovery.

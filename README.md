@@ -26,7 +26,7 @@ oracle (Piston). When a node cannot satisfy its contract, its **manager re-archi
 | Manager → re-architecture | OTP supervision (`supervise(ChildSpec)`, `SuperviseDecisionHook`) |
 | Accountability signal | monitors/links (`__DOWN__`/`__EXIT__`) |
 | Interface-visibility scope | `PermissionManifest{accepts,emits,...}` (enforced in `Scheduler::deliver`) |
-| FS read/write scope | **OSS OS-sandbox** around the pi worker (Seatbelt / Landlock+seccomp) — *not* GraphReact |
+| FS read/write scope | **OSS OS-sandbox** around the pi worker (rootless OCI / Seatbelt) — *not* GraphReact |
 | Bottom-up order | explicit **deps-ready** message gating (not `register_node` height — dynamic children default to height 0) |
 | Dependency DAG | app-level directed adjacency (+ reverse); `graphreact-algorithms::dag` for order/cycle-check |
 | Executable oracle | **Piston** (configured through `PISTON_URL`) |

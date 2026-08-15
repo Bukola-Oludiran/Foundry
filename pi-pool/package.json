@@ -9,11 +9,15 @@
     "format:check": "prettier --check 'src/**/*.ts' 'scripts/**/*.ts' 'fixtures/**/*.{js,mjs,json}' package.json tsconfig.json",
     "typecheck": "tsc --noEmit",
     "validate:ir": "node scripts/validate-ir.ts",
+    "validate:languages": "node scripts/validate-language-backends.ts",
+    "validate:doer-tools": "node scripts/validate-doer-tools.ts",
     "validate:runner-gen": "node scripts/validate-runner-gen.ts",
     "validate:sandbox": "node scripts/validate-sandbox.ts",
     "validate:build": "node scripts/validate-build.ts",
     "validate:server": "node scripts/validate-server.ts",
-    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen",
+    "validate:security": "node scripts/validate-worker-security.ts",
+    "validate:oci": "node scripts/validate-oci-sandbox.ts",
+    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:doer-tools && npm run validate:security",
     "test:local": "npm test && npm run validate:sandbox && npm run validate:build && npm run validate:server"
   },
   "dependencies": {

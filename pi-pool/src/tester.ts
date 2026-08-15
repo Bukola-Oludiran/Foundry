@@ -5,11 +5,13 @@
 // the verdict is identical. Black-box: reads only the built module + its declared deps.
 
 import type { TestRequest, TestResult, Failure } from "./contract.ts";
-import { generatePythonRunner, parseVerdict } from "./runner-gen.ts";
+import { parseVerdict } from "./runner-gen.ts";
+import { languageBackend, type LanguageBackend } from "./language-backend.ts";
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
 
 const abs = (ws: string, p: string): string =>
   isAbsolute(p) ? p : join(ws, p);
@@ -25,22 +27,37 @@ interface PFile {
   content: string;
 }
 
+type TestResultCore = Omit<TestResult, "artifact">;
+
+function withArtifact(result: TestResultCore): TestResult {
+  const encoded = Buffer.from(JSON.stringify(result));
+  return {
+    ...result,
+    artifact: {
+      sha256: createHash("sha256").update(encoded).digest("hex"),
+      size: encoded.byteLength,
+      media_type: "application/vnd.foundry.test-result+json",
+    },
+  };
+}
+
 /** Flatten module-under-test + deps + generated runner (runner is files[0] = the main file). */
-function assembleFiles(req: TestRequest): PFile[] {
+function assembleFiles(req: TestRequest, backend: LanguageBackend): PFile[] {
   const moduleName = sanitize(req.node_id);
-  const runner = generatePythonRunner({
+  backend.validateCases(req.acceptance.cases);
+  const runner = backend.generateRunner({
     moduleImportName: moduleName,
     opNames: req.provides.operations.map((o) => o.name),
     cases: req.acceptance.cases,
   });
-  const files: PFile[] = [{ name: "__runner.py", content: runner }];
+  const files: PFile[] = [{ name: backend.runnerFile, content: runner }];
   files.push({
-    name: `${moduleName}.py`,
+    name: backend.moduleFile(moduleName),
     content: readFileSync(abs(req.workspace, req.write_target), "utf-8"),
   });
   for (const d of req.deps) {
     files.push({
-      name: `${d.import_name}.py`,
+      name: backend.moduleFile(d.import_name),
       content: readFileSync(abs(req.workspace, d.read_path), "utf-8"),
     });
   }
@@ -63,16 +80,17 @@ function toResult(
         (piston.stderr || "").trim().slice(0, 400) ||
         `no verdict (exit ${piston.code})`,
     };
-    return {
+    return withArtifact({
       node_id: nodeId,
       verdict: "red",
       passed: 0,
       failed: 1,
       failures: [err],
+      failure_code: "EXECUTION_FAILED",
       piston,
-    };
+    });
   }
-  return {
+  return withArtifact({
     node_id: nodeId,
     verdict: v.failed === 0 ? "green" : "red",
     passed: v.passed,
@@ -83,18 +101,27 @@ function toResult(
       actual: f.actual,
       error: f.error,
     })),
+    failure_code: v.failed === 0 ? null : "ACCEPTANCE_FAILED",
     piston,
-  };
+  });
 }
 
-function runLocal(req: TestRequest, files: PFile[]): TestResult {
+function runLocal(
+  req: TestRequest,
+  files: PFile[],
+  backend: LanguageBackend,
+): TestResult {
   const dir = mkdtempSync(join(tmpdir(), "foundry-test-"));
   try {
     for (const f of files) writeFileSync(join(dir, f.name), f.content);
-    const proc = spawnSync("python3", ["__runner.py"], {
+    const invocation = backend.localCommand(files.map((file) => file.name));
+    const proc = spawnSync(invocation.command, invocation.args, {
       cwd: dir,
       encoding: "utf-8",
-      timeout: (req.acceptance.perf?.time_ms ?? 3000) + 2000,
+      timeout: Math.min(
+        req.resource_policy.timeout_ms,
+        (req.acceptance.perf?.time_ms ?? 3000) + 2000,
+      ),
     });
     return toResult(req.node_id, proc.stdout ?? "", {
       code: proc.status ?? -1,
@@ -135,15 +162,21 @@ async function runOnPiston(
   files: PFile[],
   url: string,
 ): Promise<TestResult> {
-  const version = await resolvePistonVersion(url, req.language);
+  const backend = languageBackend(req.language);
+  const version = await resolvePistonVersion(url, backend.pistonLanguage);
   const body = {
-    language: req.language,
+    language: backend.pistonLanguage,
     version,
     files,
-    run_timeout: req.acceptance.perf?.time_ms ?? 3000,
-    run_memory_limit: req.acceptance.perf?.mem_mb
-      ? req.acceptance.perf.mem_mb * 1_000_000
-      : -1,
+    run_timeout: Math.min(
+      req.resource_policy.timeout_ms,
+      req.acceptance.perf?.time_ms ?? req.resource_policy.timeout_ms,
+    ),
+    run_memory_limit:
+      Math.min(
+        req.resource_policy.memory_mb,
+        req.acceptance.perf?.mem_mb ?? req.resource_policy.memory_mb,
+      ) * 1_000_000,
   };
   const resp = await fetch(`${url}/api/v2/execute`, {
     method: "POST",
@@ -166,19 +199,20 @@ async function runOnPiston(
       actual: null,
       error: data.message ?? "piston: no run stage",
     };
-    return {
+    return withArtifact({
       node_id: req.node_id,
       verdict: "red",
       passed: 0,
       failed: 1,
       failures: [err],
+      failure_code: "PISTON_FAILED",
       piston: {
         code: -1,
         signal: null,
         stdout: "",
         stderr: data.message ?? "",
       },
-    };
+    });
   }
   const run = data.run;
   return toResult(req.node_id, run.stdout ?? "", {
@@ -193,8 +227,9 @@ export async function executeTest(
   req: TestRequest,
   cfg: TesterConfig = { mode: "local" },
 ): Promise<TestResult> {
-  const files = assembleFiles(req);
+  const backend = languageBackend(req.language);
+  const files = assembleFiles(req, backend);
   if (cfg.mode === "piston")
     return runOnPiston(req, files, cfg.pistonUrl ?? "http://127.0.0.1:2000");
-  return runLocal(req, files);
+  return runLocal(req, files, backend);
 }

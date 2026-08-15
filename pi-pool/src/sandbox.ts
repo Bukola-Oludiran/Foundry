@@ -10,15 +10,28 @@
 // its directory) so a doer cannot clobber a sibling node's code in the same folder.
 
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { realpathSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import {
+  realpathSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  copyFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import type { ResourcePolicy } from "./contract.ts";
+
+const DEFAULT_OCI_IMAGE =
+  "docker.io/library/alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1";
 
 export interface SandboxScope {
   workspace: string; // repo root — reads within it are default-denied
   readPaths: string[]; // declared read-set (dependency interfaces), read-only
   writeTarget: string; // the ONE file the worker may write
   allowNetwork?: boolean; // a doer needs the LLM; defaults true
+  resourcePolicy?: ResourcePolicy;
+  ociImage?: string;
 }
 
 const real = (p: string): string => {
@@ -34,10 +47,37 @@ export function sandboxAvailability(): {
   available: boolean;
   reason: string | null;
 } {
-  if (process.platform !== "darwin") {
+  const mode =
+    process.env.FOUNDRY_SANDBOX ??
+    (process.platform === "darwin" ? "seatbelt" : "oci");
+  if (mode === "oci") {
+    const probe = spawnSync(
+      "docker",
+      ["info", "--format", "{{json .SecurityOptions}}"],
+      { encoding: "utf8" },
+    );
+    if (probe.status !== 0) {
+      return {
+        available: false,
+        reason: (probe.stderr ?? "").trim() || "Docker daemon unavailable",
+      };
+    }
+    if (
+      process.platform === "linux" &&
+      !probe.stdout.includes("rootless") &&
+      process.env.FOUNDRY_ALLOW_ROOTFUL_OCI !== "1"
+    ) {
+      return {
+        available: false,
+        reason: "Linux production requires a rootless Docker daemon",
+      };
+    }
+    return { available: true, reason: null };
+  }
+  if (mode !== "seatbelt" || process.platform !== "darwin") {
     return {
       available: false,
-      reason: "macOS Seatbelt is the only implemented backend",
+      reason: `sandbox mode '${mode}' is unavailable on ${process.platform}`,
     };
   }
   const probe = spawnSync(
@@ -53,6 +93,100 @@ export function sandboxAvailability(): {
     };
   }
   return { available: true, reason: null };
+}
+
+function stagePath(
+  workspace: string,
+  stage: string,
+  path: string,
+): { relativePath: string; staged: string } {
+  const absolute = real(resolve(workspace, path));
+  const relativePath = relative(workspace, absolute);
+  if (relativePath.startsWith(`..${sep}`) || relativePath === "..") {
+    throw new Error(`sandbox path escapes workspace: ${path}`);
+  }
+  return { relativePath, staged: join(stage, relativePath) };
+}
+
+function runOci(
+  scope: SandboxScope,
+  command: string,
+  args: string[],
+  opts: { cwd?: string; input?: string },
+): SpawnSyncReturns<string> {
+  const workspace = real(scope.workspace);
+  const stage = mkdtempSync(join(tmpdir(), "foundry-oci-"));
+  const target = stagePath(workspace, stage, scope.writeTarget);
+  const promotesTarget = args.some(
+    (arg) => real(resolve(arg)) === real(resolve(scope.writeTarget)),
+  );
+  try {
+    for (const source of [scope.writeTarget, ...scope.readPaths]) {
+      const item = stagePath(workspace, stage, source);
+      mkdirSync(dirname(item.staged), { recursive: true });
+      copyFileSync(resolve(workspace, source), item.staged);
+    }
+    const containerTarget = `/workspace/${target.relativePath}`;
+    const translatedArgs = args.map((arg) => {
+      const absolute = real(resolve(arg));
+      const pathFromWorkspace = relative(workspace, absolute);
+      if (
+        pathFromWorkspace !== ".." &&
+        !pathFromWorkspace.startsWith(`..${sep}`)
+      ) {
+        return `/workspace/${pathFromWorkspace}`;
+      }
+      return arg;
+    });
+    const policy = scope.resourcePolicy ?? {
+      timeout_ms: 300_000,
+      memory_mb: 1024,
+      cpu_count: 2,
+      pids: 256,
+      network: "none",
+    };
+    const uid = process.getuid?.() ?? 65532;
+    const gid = process.getgid?.() ?? 65532;
+    const dockerArgs = [
+      "run",
+      "--rm",
+      "--interactive",
+      "--read-only",
+      "--network",
+      "none",
+      "--cap-drop",
+      "ALL",
+      "--security-opt",
+      "no-new-privileges",
+      "--pids-limit",
+      String(policy.pids),
+      "--ulimit",
+      "nofile=1024:1024",
+      "--memory",
+      `${policy.memory_mb}m`,
+      "--cpus",
+      String(policy.cpu_count),
+      "--user",
+      `${uid}:${gid}`,
+      "--mount",
+      `type=bind,src=${stage},dst=/workspace`,
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=64m",
+      scope.ociImage ?? process.env.FOUNDRY_OCI_IMAGE ?? DEFAULT_OCI_IMAGE,
+      command,
+      ...translatedArgs,
+    ];
+    const result = spawnSync("docker", dockerArgs, {
+      input: opts.input,
+      encoding: "utf8",
+      timeout: policy.timeout_ms,
+    });
+    if (result.status === 0 && promotesTarget)
+      copyFileSync(target.staged, resolve(scope.writeTarget));
+    return result;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
 }
 
 /** Generate a macOS Seatbelt (SBPL) profile for the given scope. */
@@ -96,9 +230,13 @@ export function runSandboxed(
   args: string[],
   opts: { cwd?: string; input?: string } = {},
 ): SpawnSyncReturns<string> {
-  if (process.platform !== "darwin") {
+  const mode =
+    process.env.FOUNDRY_SANDBOX ??
+    (process.platform === "darwin" ? "seatbelt" : "oci");
+  if (mode === "oci") return runOci(scope, command, args, opts);
+  if (mode !== "seatbelt" || process.platform !== "darwin") {
     throw new Error(
-      "runSandboxed: only macOS/Seatbelt implemented; Linux Landlock adapter is TODO",
+      `runSandboxed: sandbox mode '${mode}' is unavailable on ${process.platform}`,
     );
   }
   const dir = mkdtempSync(join(tmpdir(), "foundry-sb-"));

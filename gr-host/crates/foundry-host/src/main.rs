@@ -23,6 +23,7 @@ use graphreact_core::{
     NodeMounted, PermissionManifest, Scheduler, TelemetrySink,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -64,11 +65,16 @@ impl TelemetrySink for AuditSink {
 }
 
 /// One dyad build attempt: POST /build (with attempt+feedback) then POST /test.
-fn build_once(job: &Job, base: &str, attempt: u32, feedback: &Value) -> Verdict {
+fn build_once(job: &Job, base: &str, token: &str, attempt: u32, feedback: &Value) -> Verdict {
     let mut br = job.build_req.clone();
     br["attempt"] = json!(attempt);
     br["feedback"] = feedback.clone();
-    match http_post_json(base, "/build", &br) {
+    br["job_id"] = json!(format!(
+        "{}:{}:build:{attempt}",
+        br["run_id"].as_str().unwrap_or("run"),
+        br["node_id"].as_str().unwrap_or("node")
+    ));
+    match http_post_json(base, "/build", &br, token) {
         Err(e) => return Verdict::Error(format!("build: {e}")),
         Ok(v) => {
             if !v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -79,7 +85,13 @@ fn build_once(job: &Job, base: &str, attempt: u32, feedback: &Value) -> Verdict 
             }
         }
     }
-    match http_post_json(base, "/test", &job.test_req) {
+    let mut tr = job.test_req.clone();
+    tr["job_id"] = json!(format!(
+        "{}:{}:test:{attempt}",
+        tr["run_id"].as_str().unwrap_or("run"),
+        tr["node_id"].as_str().unwrap_or("node")
+    ));
+    match http_post_json(base, "/test", &tr, token) {
         Err(e) => Verdict::Error(format!("test: {e}")),
         Ok(v) => {
             if v.get("verdict").and_then(Value::as_str) == Some("green") {
@@ -101,6 +113,7 @@ fn build_with_retry(
     nid: &str,
     jobs: &HashMap<String, Job>,
     base: &str,
+    token: &str,
     counts: &RefCell<HashMap<String, u32>>,
 ) -> (Verdict, u32) {
     let Some(job) = jobs.get(nid) else {
@@ -110,7 +123,7 @@ fn build_with_retry(
     let mut last = Verdict::Pending;
     for attempt in 1..=MAX_RETRIES {
         *counts.borrow_mut().entry(nid.to_string()).or_insert(0) += 1;
-        last = build_once(job, base, attempt, &feedback);
+        last = build_once(job, base, token, attempt, &feedback);
         match &last {
             Verdict::Green => return (Verdict::Green, attempt),
             Verdict::Red(detail) => feedback = json!(detail),
@@ -121,7 +134,14 @@ fn build_with_retry(
     (last, MAX_RETRIES)
 }
 
-fn build_jobs(ir: &Ir, plan: &BuildPlan, ws: &str) -> HashMap<String, Job> {
+fn build_jobs(
+    ir: &Ir,
+    plan: &BuildPlan,
+    ws: &str,
+    ir_digest: &str,
+    run_id: &str,
+    base_commit: &str,
+) -> HashMap<String, Job> {
     let by_id: HashMap<&str, &Node> = ir.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let default_lang = ir
         .spec
@@ -165,13 +185,37 @@ fn build_jobs(ir: &Ir, plan: &BuildPlan, ws: &str) -> HashMap<String, Job> {
             Kind::Leaf => "leaf",
             Kind::Integrator => "integrator",
         };
+        let context = json!({
+            "protocol_version": 1,
+            "job_id": format!("{}:pending", n.id),
+            "run_id": run_id,
+            "ir_digest": ir_digest,
+            "base_commit": base_commit,
+            "resource_policy": {
+                "timeout_ms": 300_000,
+                "memory_mb": 1024,
+                "cpu_count": 2,
+                "pids": 256,
+                "network": "model-egress",
+            },
+        });
         let build_req = json!({
+            "protocol_version": context["protocol_version"], "job_id": context["job_id"],
+            "run_id": context["run_id"], "ir_digest": context["ir_digest"],
+            "base_commit": context["base_commit"], "resource_policy": context["resource_policy"],
             "node_id": n.id, "kind": kind, "language": lang, "workspace": ws,
             "write_target": n.implementation.write_target, "provides": provides.clone(),
             "requires": requires, "composition": n.implementation.composition,
             "children": children, "attempt": 1, "feedback": Value::Null,
         });
         let test_req = json!({
+            "protocol_version": context["protocol_version"], "job_id": context["job_id"],
+            "run_id": context["run_id"], "ir_digest": context["ir_digest"],
+            "base_commit": context["base_commit"], "resource_policy": {
+                "timeout_ms": n.acceptance.perf.as_ref().and_then(|p| p.time_ms).unwrap_or(3_000),
+                "memory_mb": n.acceptance.perf.as_ref().and_then(|p| p.mem_mb).unwrap_or(256),
+                "cpu_count": 1, "pids": 64, "network": "none",
+            },
             "node_id": n.id, "language": lang, "workspace": ws,
             "write_target": n.implementation.write_target, "provides": provides,
             "acceptance": serde_json::to_value(&n.acceptance).unwrap_or(Value::Null), "deps": deps,
@@ -213,13 +257,18 @@ fn main() {
         std::process::exit(2);
     };
     let base = arg(&args, "--pi-pool").unwrap_or_else(|| "http://127.0.0.1:8787".to_string());
-    let ws = arg(&args, "--workspace").unwrap_or_else(|| {
+    let workspace_root = arg(&args, "--workspace").unwrap_or_else(|| {
         std::env::temp_dir()
             .join("foundry-ws")
             .to_string_lossy()
             .into_owned()
     });
     let rearchitect = arg(&args, "--rearchitect");
+    let base_commit = arg(&args, "--base").unwrap_or_else(|| "uncommitted".to_string());
+    let worker_token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
+        eprintln!("FOUNDRY_WORKER_TOKEN is required");
+        std::process::exit(2);
+    });
 
     let raw = std::fs::read_to_string(&ir_path).unwrap_or_else(|e| {
         eprintln!("read {ir_path}: {e}");
@@ -229,6 +278,18 @@ fn main() {
         eprintln!("parse IR: {e}");
         std::process::exit(1);
     });
+    let ir_digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let run_digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{ir_digest}:{base_commit}").as_bytes())
+    );
+    let run_id = format!("run-{}", &run_digest[..16]);
+    let ws = std::path::Path::new(&workspace_root)
+        .join(".foundry")
+        .join("attempts")
+        .join(&run_id)
+        .to_string_lossy()
+        .into_owned();
     let plan = compile(&ir).unwrap_or_else(|errs| {
         eprintln!("IR did not compile:");
         for e in &errs {
@@ -243,7 +304,14 @@ fn main() {
     println!("  workspace:    {ws}");
     println!("  pi-pool:      {base}");
 
-    let jobs = Rc::new(build_jobs(&ir, &plan, &ws));
+    let jobs = Rc::new(build_jobs(
+        &ir,
+        &plan,
+        &ws,
+        &ir_digest,
+        &run_id,
+        &base_commit,
+    ));
     let verdicts: Rc<RefCell<HashMap<String, Verdict>>> = Rc::new(RefCell::new(
         ir.nodes
             .iter()
@@ -252,6 +320,7 @@ fn main() {
     ));
     let counts: Rc<RefCell<HashMap<String, u32>>> = Rc::new(RefCell::new(HashMap::new()));
     let base = Rc::new(base);
+    let worker_token = Rc::new(worker_token);
 
     let mut graph = CommunicationGraph::new();
     for n in &ir.nodes {
@@ -275,14 +344,17 @@ fn main() {
         let verdicts_c = Rc::clone(&verdicts);
         let counts_c = Rc::clone(&counts);
         let base_c = Rc::clone(&base);
+        let token_c = Rc::clone(&worker_token);
         let body = move |_ctx: &NodeContext| {
             let nid = nid.clone();
             let jobs_c = Rc::clone(&jobs_c);
             let verdicts_c = Rc::clone(&verdicts_c);
             let counts_c = Rc::clone(&counts_c);
             let base_c = Rc::clone(&base_c);
+            let token_c = Rc::clone(&token_c);
             use_message("build", move |_msg| {
-                let (verdict, attempts) = build_with_retry(&nid, &jobs_c, &base_c, &counts_c);
+                let (verdict, attempts) =
+                    build_with_retry(&nid, &jobs_c, &base_c, &token_c, &counts_c);
                 if attempts > 1 && verdict == Verdict::Green {
                     println!(
                         "   ↻ {nid} repaired after {attempts} attempts (doer used tester feedback)"

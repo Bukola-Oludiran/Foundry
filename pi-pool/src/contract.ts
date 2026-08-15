@@ -3,6 +3,30 @@
 // These reference the IR shapes in Foundry/ir/schema.json.
 
 export type NodeKind = "leaf" | "integrator";
+export const WORKER_PROTOCOL_VERSION = 1;
+
+export interface ResourcePolicy {
+  timeout_ms: number;
+  memory_mb: number;
+  cpu_count: number;
+  pids: number;
+  network: "none" | "model-egress";
+}
+
+export interface JobContext {
+  protocol_version: 1;
+  job_id: string;
+  run_id: string;
+  ir_digest: string;
+  base_commit: string;
+  resource_policy: ResourcePolicy;
+}
+
+export interface ContentArtifact {
+  sha256: string;
+  size: number;
+  media_type: string;
+}
 
 export interface Operation {
   name: string;
@@ -42,7 +66,7 @@ export interface DepRef {
 
 // ---------- POST /build ----------
 
-export interface BuildRequest {
+export interface BuildRequest extends JobContext {
   node_id: string;
   kind: NodeKind;
   language: string;
@@ -62,12 +86,14 @@ export interface BuildResult {
   wrote: string[]; // repo-relative paths written
   summary: string;
   error: string | null;
+  failure_code: string | null;
+  artifact: ContentArtifact | null;
   usage: { input_tokens: number; output_tokens: number } | null;
 }
 
 // ---------- POST /test ----------
 
-export interface TestRequest {
+export interface TestRequest extends JobContext {
   node_id: string;
   language: string;
   workspace: string;
@@ -90,6 +116,8 @@ export interface TestResult {
   passed: number;
   failed: number;
   failures: Failure[];
+  failure_code: string | null;
+  artifact: ContentArtifact;
   piston: {
     code: number;
     signal: string | null;

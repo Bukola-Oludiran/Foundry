@@ -6,6 +6,7 @@
 
 import { createFoundryServer } from "../src/server.ts";
 import { sandboxAvailability } from "../src/sandbox.ts";
+import { fixtureContext } from "./context.ts";
 import { StubLlm, type LlmRequest } from "../src/llm.ts";
 import type {
   BuildRequest,
@@ -71,6 +72,7 @@ function toBuild(node: IrNode, workspace: string): BuildRequest {
     read_path: byId.get(r.node)!.implementation.write_target,
   }));
   return {
+    ...fixtureContext(`${node.id}:build:1`, "model-egress"),
     node_id: node.id,
     kind: node.kind,
     language: "python",
@@ -91,6 +93,7 @@ function toBuild(node: IrNode, workspace: string): BuildRequest {
 
 function toTest(node: IrNode, workspace: string): TestRequest {
   return {
+    ...fixtureContext(`${node.id}:test:1`, "none"),
     node_id: node.id,
     language: "python",
     workspace,
@@ -128,7 +131,10 @@ function topoOrder(nodes: IrNode[]): IrNode[] {
 async function post<T>(base: string, path: string, body: unknown): Promise<T> {
   const r = await fetch(base + path, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer fixture-token",
+    },
     body: JSON.stringify(body),
   });
   return (await r.json()) as T;
@@ -140,7 +146,11 @@ async function main() {
   const llm = new StubLlm(
     (r: LlmRequest) => IMPL[(r.meta?.node_id as string) ?? ""] ?? "# none\n",
   );
-  const server = createFoundryServer({ llm });
+  const server = createFoundryServer({
+    llm,
+    authToken: "fixture-token",
+    workspaceRoot: ws,
+  });
   await new Promise<void>((res) => server.listen(0, "127.0.0.1", res));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   let bad = 0;

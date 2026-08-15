@@ -27,6 +27,8 @@ curl -s http://127.0.0.1:2000/api/v2/runtimes    # confirm a python runtime is l
 ```bash
 npm install --prefix pi-pool
 export ANTHROPIC_API_KEY=sk-ant-...                   # pi-ai auto-resolves it via getEnvApiKey
+export FOUNDRY_WORKER_TOKEN=<at-least-32-random-characters>
+export FOUNDRY_WORKSPACE_ROOT=/tmp/foundry-live
 ```
 
 ## Run the live build
@@ -36,13 +38,15 @@ export ANTHROPIC_API_KEY=sk-ant-...                   # pi-ai auto-resolves it v
 FOUNDRY_LLM_PROVIDER=anthropic \
 FOUNDRY_LLM_MODEL=<supported-model-id> \
 FOUNDRY_TESTER=piston \
+FOUNDRY_SANDBOX=oci \
 PORT=8811 node pi-pool/src/server.ts &                # logs: LLM=anthropic/…, tester=piston
 
 cargo build --manifest-path gr-host/Cargo.toml
 ./gr-host/target/debug/foundry-host \
   --ir ./ir/examples/string-utils.ir.json \
   --pi-pool http://127.0.0.1:8811 \
-  --workspace /tmp/foundry-live
+  --workspace /tmp/foundry-live \
+  --base <immutable-git-commit>
 ```
 
 Expected: a real LLM writes `lowercase/trim/hyphenate/slugify` from their contracts, Piston verifies

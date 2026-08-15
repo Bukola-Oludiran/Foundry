@@ -8,6 +8,7 @@
 
 import { buildNode } from "../src/doer.ts";
 import { sandboxAvailability } from "../src/sandbox.ts";
+import { fixtureContext } from "./context.ts";
 import { StubLlm, type LlmRequest } from "../src/llm.ts";
 import { generatePythonRunner, parseVerdict } from "../src/runner-gen.ts";
 import type { BuildRequest, DepRef, Interface } from "../src/contract.ts";
@@ -74,6 +75,7 @@ function toBuildRequest(node: IrNode, workspace: string): BuildRequest {
     };
   });
   return {
+    ...fixtureContext(`${node.id}:build:1`, "model-egress"),
     node_id: node.id,
     kind: node.kind,
     language: "python",

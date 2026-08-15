@@ -7,12 +7,18 @@
 import type { BuildRequest, BuildResult } from "./contract.ts";
 import type { LlmClient } from "./llm.ts";
 import { runSandboxed } from "./sandbox.ts";
-import { mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join, isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
+import type { SpawnSyncReturns } from "node:child_process";
 
 export const DOER_SYSTEM =
   "You implement exactly one module of a larger software system, to a fixed interface " +
-  "contract. You never redefine your dependencies — you import them. You output only code.";
+  "contract. You never redefine your dependencies — you import them. You may respond with " +
+  "`FOUNDRY_TOOL read <import_name>` to inspect one declared dependency. Otherwise output only code.";
+
+const MAX_DOER_TURNS = 3;
+const MAX_TOOL_BYTES = 256 * 1024;
 
 /** Build the doer prompt from the node's contract + its dependency interfaces. */
 export function assemblePrompt(req: BuildRequest): string {
@@ -59,6 +65,12 @@ const abs = (workspace: string, p: string): string =>
 export async function buildNode(
   req: BuildRequest,
   llm: LlmClient,
+  sandboxRunner: (
+    scope: Parameters<typeof runSandboxed>[0],
+    command: string,
+    args: string[],
+    opts?: { cwd?: string; input?: string },
+  ) => SpawnSyncReturns<string> = runSandboxed,
 ): Promise<BuildResult> {
   const target = abs(req.workspace, req.write_target);
   // The host/compiler owns the workspace file layout; ensure the target exists so the
@@ -66,21 +78,69 @@ export async function buildNode(
   mkdirSync(dirname(target), { recursive: true });
   if (!existsSync(target)) writeFileSync(target, "");
 
-  const res = await llm.complete({
-    system: DOER_SYSTEM,
-    prompt: assemblePrompt(req),
-    maxTokens: 2048,
-    meta: { node_id: req.node_id, kind: req.kind, attempt: req.attempt },
-  });
-  const code = extractCode(res.text);
+  let prompt = assemblePrompt(req);
+  let code: string | null = null;
+  const usage = { input_tokens: 0, output_tokens: 0 };
+  for (let turn = 1; turn <= MAX_DOER_TURNS; turn++) {
+    const response = await llm.complete({
+      system: DOER_SYSTEM,
+      prompt,
+      maxTokens: 2048,
+      meta: {
+        node_id: req.node_id,
+        kind: req.kind,
+        attempt: req.attempt,
+        turn,
+      },
+    });
+    usage.input_tokens += response.usage.input_tokens;
+    usage.output_tokens += response.usage.output_tokens;
+    const tool = response.text
+      .trim()
+      .match(/^FOUNDRY_TOOL\s+read\s+([a-zA-Z0-9_-]+)$/);
+    if (!tool) {
+      code = extractCode(response.text);
+      break;
+    }
+    const dependency = req.requires.find(
+      (candidate) => candidate.import_name === tool[1],
+    );
+    if (!dependency) {
+      prompt += `\n\nTool error: '${tool[1]}' is not a declared dependency. Choose a declared import or emit code.`;
+      continue;
+    }
+    const content = readFileSync(
+      abs(req.workspace, dependency.read_path),
+      "utf8",
+    );
+    if (Buffer.byteLength(content) > MAX_TOOL_BYTES) {
+      prompt += `\n\nTool error: '${tool[1]}' exceeds the ${MAX_TOOL_BYTES}-byte read limit. Emit code from its interface.`;
+      continue;
+    }
+    prompt += `\n\nTool result for declared dependency '${tool[1]}':\n\`\`\`${req.language}\n${content}\n\`\`\``;
+  }
+  if (code === null) {
+    return {
+      node_id: req.node_id,
+      ok: false,
+      wrote: [],
+      summary: "doer exhausted its bounded tool loop",
+      error: `no code after ${MAX_DOER_TURNS} turns`,
+      failure_code: "TOOL_LOOP_EXHAUSTED",
+      artifact: null,
+      usage,
+    };
+  }
 
   // Write through the sandbox: scoped to this node's target + read-only on its read-set.
   const scope = {
     workspace: req.workspace,
     readPaths: req.requires.map((r) => abs(req.workspace, r.read_path)),
     writeTarget: target,
+    allowNetwork: false,
+    resourcePolicy: req.resource_policy,
   };
-  const w = runSandboxed(scope, "/bin/sh", ["-c", `cat > "${target}"`], {
+  const w = sandboxRunner(scope, "tee", [target], {
     input: code,
   });
   if (w.status !== 0) {
@@ -90,15 +150,24 @@ export async function buildNode(
       wrote: [],
       summary: "sandboxed write failed",
       error: (w.stderr || "").trim() || `exit ${w.status}`,
-      usage: res.usage,
+      failure_code: "SANDBOX_WRITE_FAILED",
+      artifact: null,
+      usage,
     };
   }
+  const content = readFileSync(target);
   return {
     node_id: req.node_id,
     ok: true,
     wrote: [req.write_target],
     summary: `wrote ${code.split("\n").length} lines to ${req.write_target}`,
     error: null,
-    usage: res.usage,
+    failure_code: null,
+    artifact: {
+      sha256: createHash("sha256").update(content).digest("hex"),
+      size: content.byteLength,
+      media_type: "text/plain; charset=utf-8",
+    },
+    usage,
   };
 }
