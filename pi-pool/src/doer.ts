@@ -71,6 +71,7 @@ export async function buildNode(
     args: string[],
     opts?: { cwd?: string; input?: string },
   ) => SpawnSyncReturns<string> = runSandboxed,
+  signal?: AbortSignal,
 ): Promise<BuildResult> {
   const target = abs(req.workspace, req.write_target);
   // The host/compiler owns the workspace file layout; ensure the target exists so the
@@ -82,6 +83,7 @@ export async function buildNode(
   let code: string | null = null;
   const usage = { input_tokens: 0, output_tokens: 0 };
   for (let turn = 1; turn <= MAX_DOER_TURNS; turn++) {
+    if (signal?.aborted) throw new Error("job cancelled");
     const response = await llm.complete({
       system: DOER_SYSTEM,
       prompt,
@@ -95,6 +97,7 @@ export async function buildNode(
     });
     usage.input_tokens += response.usage.input_tokens;
     usage.output_tokens += response.usage.output_tokens;
+    if (signal?.aborted) throw new Error("job cancelled");
     const tool = response.text
       .trim()
       .match(/^FOUNDRY_TOOL\s+read\s+([a-zA-Z0-9_-]+)$/);
@@ -131,6 +134,7 @@ export async function buildNode(
       usage,
     };
   }
+  if (signal?.aborted) throw new Error("job cancelled");
 
   // Write through the sandbox: scoped to this node's target + read-only on its read-set.
   const scope = {

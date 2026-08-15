@@ -254,6 +254,24 @@ fn report(node: &str, verdict: &Verdict) -> bool {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|value| value == "cancel") {
+        let Some(run_id) = arg(&args, "--run") else {
+            eprintln!("usage: foundry-host cancel --run <id> --durability-dir <dir>");
+            std::process::exit(2);
+        };
+        let Some(durability_dir) = arg(&args, "--durability-dir") else {
+            eprintln!("usage: foundry-host cancel --run <id> --durability-dir <dir>");
+            std::process::exit(2);
+        };
+        durable::request_cancel(std::path::Path::new(&durability_dir), &run_id).unwrap_or_else(
+            |error| {
+                eprintln!("cannot request cancellation: {error}");
+                std::process::exit(1);
+            },
+        );
+        println!("cancellation requested for {run_id}");
+        return;
+    }
     let Some(ir_path) = arg(&args, "--ir") else {
         eprintln!("usage: foundry-host --ir <path> [--pi-pool URL] [--workspace DIR] [--rearchitect NODE]");
         std::process::exit(2);

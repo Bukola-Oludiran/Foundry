@@ -13,7 +13,7 @@ use graphreact_core::{
     RestartTracker, Scheduler, SuperviseDecision, Supervisor,
 };
 use graphreact_durable_runtime::{
-    dispatch_pending_effects, enqueue_durable_message, install_local, recover,
+    cancel_run, dispatch_pending_effects, enqueue_durable_message, install_local, recover,
     write_runtime_snapshot, AdapterFuture, DurableEffectAdapter, EffectAdapterError,
     EffectAdapterRegistry,
 };
@@ -94,6 +94,44 @@ impl DurableEffectAdapter for WorkerEffectAdapter {
             })
         })
     }
+
+    fn cancel<'a>(
+        &'a self,
+        effect_id: &'a graphreact_persistence::EffectId,
+    ) -> AdapterFuture<'a, ()> {
+        Box::pin(async move {
+            http_post_json(
+                &self.base,
+                "/cancel",
+                &json!({"effect_id": effect_id.to_string()}),
+                &self.token,
+            )
+            .map(|_| ())
+            .map_err(|message| EffectAdapterError::Operation {
+                operation: "cancel".into(),
+                message,
+            })
+        })
+    }
+}
+
+pub fn request_cancel(durability_dir: &Path, run_id: &str) -> Result<(), String> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+    let requests = durability_dir.join("cancel-requests");
+    std::fs::create_dir_all(&requests).map_err(|error| error.to_string())?;
+    let path = requests.join(run_id.as_str());
+    match OpenOptions::new().create_new(true).write(true).open(path) {
+        Ok(file) => file.sync_all().map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn cancellation_requested(durability_dir: &Path, run_id: &RunId) -> bool {
+    durability_dir
+        .join("cancel-requests")
+        .join(run_id.as_str())
+        .is_file()
 }
 
 fn retry_or_fail(
@@ -504,6 +542,33 @@ pub fn run(
     );
 
     loop {
+        if cancellation_requested(&durability_dir, &run.run_id) {
+            block_on(cancel_run(
+                &scheduler,
+                engine.as_ref(),
+                FENCING_TOKEN,
+                &run.run_id,
+            ))
+            .map_err(|error| error.to_string())?;
+            block_on(engine.commit(
+                FENCING_TOKEN,
+                &[RuntimeRecordV1::RunStatusChanged {
+                    run_id: run.run_id.clone(),
+                    status: RunStatus::Cancelled,
+                    result: None,
+                    error: None,
+                    changed_at_ms: unix_time_ms(),
+                }],
+            ))
+            .map_err(|error| error.to_string())?;
+            block_on(write_runtime_snapshot(
+                &scheduler,
+                engine.as_ref(),
+                FENCING_TOKEN,
+            ))
+            .map_err(|error| error.to_string())?;
+            return Err(format!("durable run {} was cancelled", run.run_id));
+        }
         scheduler
             .process_batch()
             .map_err(|error| error.to_string())?;

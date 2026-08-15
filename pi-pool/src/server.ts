@@ -130,6 +130,8 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
     string,
     { digest: string; result: Promise<unknown> }
   >();
+  const activeJobs = new Map<string, AbortController>();
+  const cancelledJobs = new Set<string>();
 
   if (opts.idempotencyDir) mkdirSync(opts.idempotencyDir, { recursive: true });
 
@@ -213,7 +215,7 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
     route: string,
     jobId: string,
     body: unknown,
-    action: () => Promise<unknown>,
+    action: (signal: AbortSignal) => Promise<unknown>,
   ): Promise<unknown> => {
     const key = `${route}:${jobId}`;
     const digest = requestDigest(body);
@@ -241,7 +243,12 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
       idempotency.set(key, { digest, result });
       return result;
     }
-    const result = action()
+    if (cancelledJobs.has(jobId)) {
+      throw new RequestError(409, "JOB_CANCELLED", "job was cancelled");
+    }
+    const controller = new AbortController();
+    activeJobs.set(jobId, controller);
+    const result = action(controller.signal)
       .then((value) => {
         persistRecord(key, digest, value);
         return value;
@@ -249,6 +256,9 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
       .catch((error: unknown) => {
         idempotency.delete(key);
         throw error;
+      })
+      .finally(() => {
+        activeJobs.delete(jobId);
       });
     if (idempotency.size >= 10_000) {
       const oldest = idempotency.keys().next().value;
@@ -282,14 +292,35 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
           "missing or invalid bearer token",
         );
       }
+      if (req.method === "POST" && req.url === "/cancel") {
+        const raw = await readJson(req, maxBodyBytes);
+        if (
+          !raw ||
+          typeof raw !== "object" ||
+          Array.isArray(raw) ||
+          Object.keys(raw).some((key) => key !== "effect_id") ||
+          typeof (raw as { effect_id?: unknown }).effect_id !== "string" ||
+          !(raw as { effect_id: string }).effect_id.trim()
+        ) {
+          throw new RequestError(
+            400,
+            "INVALID_REQUEST",
+            "cancel requires only a non-empty effect_id",
+          );
+        }
+        const effectId = (raw as { effect_id: string }).effect_id;
+        cancelledJobs.add(effectId);
+        activeJobs.get(effectId)?.abort();
+        return send(res, 202, { effect_id: effectId, cancelled: true });
+      }
       if (req.method === "POST" && req.url === "/build") {
         const raw = await readJson(req, maxBodyBytes);
         const body = validateBuildRequest(raw, opts.workspaceRoot);
         return send(
           res,
           200,
-          await once("build", body.job_id, raw, () =>
-            buildNode(body, opts.llm),
+          await once("build", body.job_id, raw, (signal) =>
+            buildNode(body, opts.llm, undefined, signal),
           ),
         );
       }

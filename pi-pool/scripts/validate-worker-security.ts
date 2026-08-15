@@ -52,8 +52,12 @@ if (!listening) {
 }
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-async function post(body: unknown, token = "test-secret"): Promise<Response> {
-  return fetch(`${base}/test`, {
+async function post(
+  body: unknown,
+  token = "test-secret",
+  path = "/test",
+): Promise<Response> {
+  return fetch(`${base}${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -97,6 +101,12 @@ try {
   );
   await expect("rejects oversized body", 413, () =>
     post({ ...request, padding: "x".repeat(5000) }),
+  );
+  await expect("accepts cooperative cancellation", 202, () =>
+    post({ effect_id: "cancelled-job" }, "test-secret", "/cancel"),
+  );
+  await expect("rejects a cancelled job", 409, () =>
+    post({ ...request, job_id: "cancelled-job" }),
   );
 } finally {
   await new Promise<void>((resolve) => server.close(() => resolve()));

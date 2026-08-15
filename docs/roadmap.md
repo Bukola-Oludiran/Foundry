@@ -33,8 +33,11 @@ Status: in progress; the crash-recovery execution slice is implemented.
   bounded repair decisions, snapshots, terminal recovery, and disk-backed worker job idempotency.
 - Verified: an authenticated OCI-isolated four-node workflow reaches green, writes a verified
   snapshot, and a second host process recovers the succeeded run without rebuilding it.
-- Remaining: durable cancellation/control-plane admission, cooperative in-flight container
-  cancellation, repository/worktree effects, and the automated subprocess crash matrix.
+- Implemented cancellation slice: an idempotent filesystem request is accepted while the daemon is
+  live or stopped, GraphReact records cancellation before closing run admission, and the worker has
+  an authenticated cooperative cancellation endpoint. Existing artifacts are retained.
+- Remaining: process-level interruption of synchronous local/OCI runners, repository/worktree
+  effects, and the automated subprocess crash matrix.
 
 ## M4 — spec-to-IR architecture
 
