@@ -27,6 +27,10 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::studio_room::{
+    ArchitectureOperationV1, ArchitectureRoomEventV1, ArchitectureRoomTranscriptV1, MAX_EVENT_PAGE,
+};
+
 const FENCING_TOKEN: u64 = 1;
 const ENTRYPOINT: &str = "foundry-architecture-studio";
 const DEPLOYMENT_BYTES: &[u8] = b"foundry-architecture-studio-v1";
@@ -50,6 +54,36 @@ pub struct StudioOperationReceiptV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureRoomPageRefV1 {
+    pub artifact_id: String,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub event_count: usize,
+    pub last_event_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchitectureRoomTranscriptIndexV1 {
+    pub transcript_version: u32,
+    pub operation: ArchitectureOperationV1,
+    pub pages: Vec<ArchitectureRoomPageRefV1>,
+    pub event_count: usize,
+    pub last_sequence: u64,
+    pub last_event_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureRoomTranscriptRefV1 {
+    pub operation_id: String,
+    pub proposal_id: String,
+    pub index_artifact_id: String,
+    pub operation_digest: String,
+    pub last_sequence: u64,
+    pub last_event_digest: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StudioStateV1 {
     pub studio_version: u32,
     pub run_id: String,
@@ -63,6 +97,8 @@ pub struct StudioStateV1 {
     pub human_approvals: Vec<HumanArchitectureApprovalV1>,
     #[serde(default)]
     pub build_handoffs: Vec<ArchitectureBuildHandoffV1>,
+    #[serde(default)]
+    pub room_transcripts: BTreeMap<String, ArchitectureRoomTranscriptRefV1>,
     pub operation_receipts: BTreeMap<String, StudioOperationReceiptV1>,
 }
 
@@ -254,6 +290,108 @@ fn read_json<T: DeserializeOwned>(
         .map_err(|e| error("SERVICE_NOT_READY", e.to_string()))?
         .ok_or_else(|| error("SERVICE_NOT_READY", format!("artifact `{id}` is missing")))?;
     serde_json::from_slice(&bytes).map_err(|e| error("SERVICE_NOT_READY", e.to_string()))
+}
+
+/// Mirrors a proposal room into immutable GraphReact artifacts and advances the
+/// Studio state's transcript index only after every referenced page is stored.
+/// Repeating this operation with an unchanged transcript is a no-op.
+pub fn persist_room_transcript(
+    durability_dir: &Path,
+    transcript: &ArchitectureRoomTranscriptV1,
+) -> Result<ArchitectureRoomTranscriptRefV1, StudioError> {
+    let operation = &transcript.operation;
+    let studio_run_id = operation
+        .studio_run_id
+        .as_deref()
+        .ok_or_else(|| error("INVALID_COMMAND", "room is not bound to a Studio run"))?;
+    let proposal_id = operation
+        .proposal_id
+        .as_deref()
+        .ok_or_else(|| error("INVALID_COMMAND", "room is not bound to a proposal"))?;
+    let run_id = RunId::parse(studio_run_id.to_owned())
+        .map_err(|source| error("INVALID_COMMAND", source.to_string()))?;
+    let engine = engine(durability_dir)?;
+    let mut state = load_state(&engine, &run_id)?;
+    if !state
+        .proposals
+        .iter()
+        .any(|proposal| proposal.proposal_id == proposal_id)
+    {
+        return Err(error(
+            "NOT_FOUND",
+            format!("proposal `{proposal_id}` was not found"),
+        ));
+    }
+
+    let operation_digest = digest(operation);
+    let last_sequence = transcript.events.last().map_or(0, |event| event.sequence);
+    let last_event_digest = transcript
+        .events
+        .last()
+        .map(|event| event.event_digest.clone());
+    if let Some(existing) = state.room_transcripts.get(&operation.operation_id) {
+        if existing.operation_digest == operation_digest
+            && existing.last_sequence == last_sequence
+            && existing.last_event_digest == last_event_digest
+        {
+            return Ok(existing.clone());
+        }
+    }
+
+    let mut pages = Vec::new();
+    for (page_index, chunk) in transcript.events.chunks(MAX_EVENT_PAGE).enumerate() {
+        let events: Vec<ArchitectureRoomEventV1> = chunk.to_vec();
+        let Some(first) = events.first() else {
+            continue;
+        };
+        let last = events.last().expect("non-empty transcript page");
+        let artifact_id = store_json(
+            &engine,
+            &run_id,
+            format!(
+                "architecture-room-{}-page-{page_index}.json",
+                operation.operation_id
+            ),
+            "application/vnd.foundry.architecture-room-events+json",
+            &events,
+        )?;
+        pages.push(ArchitectureRoomPageRefV1 {
+            artifact_id,
+            first_sequence: first.sequence,
+            last_sequence: last.sequence,
+            event_count: events.len(),
+            last_event_digest: last.event_digest.clone(),
+        });
+    }
+    let index = ArchitectureRoomTranscriptIndexV1 {
+        transcript_version: 1,
+        operation: operation.clone(),
+        pages,
+        event_count: transcript.events.len(),
+        last_sequence,
+        last_event_digest: last_event_digest.clone(),
+    };
+    let index_artifact_id = store_json(
+        &engine,
+        &run_id,
+        format!("architecture-room-{}-index.json", operation.operation_id),
+        "application/vnd.foundry.architecture-room-index+json",
+        &index,
+    )?;
+    let reference = ArchitectureRoomTranscriptRefV1 {
+        operation_id: operation.operation_id.clone(),
+        proposal_id: proposal_id.to_owned(),
+        index_artifact_id,
+        operation_digest,
+        last_sequence,
+        last_event_digest,
+        updated_at_ms: now_ms(),
+    };
+    state
+        .room_transcripts
+        .insert(operation.operation_id.clone(), reference.clone());
+    commit_state(&engine, &run_id, &state)?;
+    Ok(reference)
 }
 
 fn default_layout() -> ArchitectureLayoutV1 {
@@ -470,6 +608,7 @@ pub fn create(
         critic_reviews: Vec::new(),
         human_approvals: Vec::new(),
         build_handoffs: Vec::new(),
+        room_transcripts: BTreeMap::new(),
         operation_receipts: BTreeMap::new(),
     };
     commit_state(&engine, &run_id, &state)?;
@@ -1348,6 +1487,10 @@ fn command_error(diagnostics: Vec<StudioCommandErrorV1>) -> StudioError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::studio_room::{
+        ArchitectureOperationKindV1, ArchitectureRoomActorKindV1, ArchitectureRoomLedger,
+        ArchitectureRoomPayloadV1,
+    };
     use foundry_ir::StudioOperationV1;
 
     fn fixture() -> (std::path::PathBuf, Ir) {
@@ -1507,6 +1650,75 @@ mod tests {
         }];
         let conflict = apply_command(&root, &state.run_id, &command, "edit-two").unwrap_err();
         assert_eq!(conflict.code(), "IDEMPOTENCY_CONFLICT");
+    }
+
+    #[test]
+    fn room_transcript_pages_are_artifacts_before_the_index_advances() {
+        let (root, ir) = fixture();
+        let state = create(
+            &root,
+            binding(),
+            ir,
+            StudioRationaleV1::default(),
+            "architect",
+            "Room evidence",
+            "create-room-evidence",
+        )
+        .unwrap();
+        let proposal = state.proposals[0].clone();
+        let ledger = ArchitectureRoomLedger::open(&root).unwrap();
+        let request = serde_json::json!({"specification": "test"});
+        let (operation, _) = ledger
+            .create(
+                &state.binding.repository_coordinate,
+                "room-operation",
+                &request,
+                ArchitectureOperationKindV1::InitialArchitecture,
+                "architect",
+                1,
+                vec!["read".into(), "edit".into()],
+                false,
+            )
+            .unwrap();
+        ledger
+            .bind_proposal(
+                &operation.operation_id,
+                &state.run_id,
+                &proposal.proposal_id,
+                &proposal.base_revision_id,
+                &proposal.head_semantic_digest,
+            )
+            .unwrap();
+        ledger
+            .append_event(
+                &operation.operation_id,
+                ArchitectureRoomActorKindV1::Architect,
+                "architect",
+                ArchitectureRoomPayloadV1::Message {
+                    message: "Candidate ready for compilation".into(),
+                },
+            )
+            .unwrap();
+
+        let transcript = ledger.transcript(&operation.operation_id).unwrap();
+        let first = persist_room_transcript(&root, &transcript).unwrap();
+        let repeated = persist_room_transcript(&root, &transcript).unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(first.last_sequence, 2);
+
+        let reopened = snapshot(&root, &state.run_id, &proposal.proposal_id).unwrap();
+        assert_eq!(
+            reopened.state.room_transcripts.get(&operation.operation_id),
+            Some(&first)
+        );
+        let persistence = engine(&root).unwrap();
+        let index: ArchitectureRoomTranscriptIndexV1 =
+            read_json(&persistence, &first.index_artifact_id).unwrap();
+        assert_eq!(index.event_count, 2);
+        assert_eq!(index.pages.len(), 1);
+        let page: Vec<ArchitectureRoomEventV1> =
+            read_json(&persistence, &index.pages[0].artifact_id).unwrap();
+        assert_eq!(page, transcript.events);
     }
 
     #[test]

@@ -17,6 +17,17 @@ reusing the completed question turn.
 Room events are curated. Thought chunks, partial JSON, commands, paths, raw output, environment
 values, and credentials are excluded before persistence.
 
+Generative edits use `POST /v1/studio-operations/generate` and return a room operation immediately.
+Only one semantic operation may be active for a proposal, while independent proposal branches may
+run concurrently. A stale proposal is never rewritten in place: editors submit
+`POST /v1/studio-operations/rebase` with the stale and current approved head digests, and Foundry
+creates a linked proposal room branch before asking the architect to preserve the stale intent.
+
+Once a room is bound to a proposal, Foundry mirrors its hash-chained events into immutable,
+200-record GraphReact artifact pages. The Studio state references a transcript-index artifact only
+after every page is stored. Cursor and SSE reads perform this durable mirror before returning new
+events, so the visible conversation can be recovered alongside the architecture revision.
+
 ```sh
 export FOUNDRY_STUDIO_SERVICE_NSEC='<workload secret>'
 export FOUNDRY_WORKER_TOKEN='<workload secret>'
@@ -62,9 +73,11 @@ NIP-98 session exchange, and retains the five-minute capability only in Tauri me
 capability, an nsec, or a worker token in a URL, browser store, or command line.
 
 For a repository without a Studio, Buzz posts the product specification to
-`POST /v1/studios/architect`. Foundry runs its bounded architect repair loop, compiles the complete
-IR, creates the durable initial proposal, and invokes the separately configured critic before
-returning the projection. Retrying with the same idempotency key resolves to the same Studio.
+`POST /v1/studio-operations/architect`. Foundry first commits and returns the durable operation, then
+runs its bounded architect repair loop, compiles the complete IR, creates the initial proposal, and
+invokes the separately configured critic. The legacy `POST /v1/studios/architect` endpoint remains
+a bounded-wait compatibility wrapper. Retrying with the same idempotency key resolves to the same
+operation and Studio.
 
 ## Buzz-managed ACP agents
 

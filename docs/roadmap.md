@@ -154,6 +154,10 @@ Status: editable preview implementation.
   compiler diagnostics, three-round architect–critic repair, monotonic cancellation, acknowledged
   immediate steering with checkpoint fallback, structured question/answer resumption, and Buzz
   timeline/filter/reconnect/offline projections.
+- Implemented proposal-scoped asynchronous generative edits and explicit architect-assisted rebase
+  rooms. Rebase creates a linked branch from the current approved proposal, preserves the stale
+  proposal as evidence, and uses compare-and-swap head digests. Room histories are additionally
+  paged into immutable GraphReact artifacts with a transcript index committed in Studio state.
 - Remaining for the ACP path: issue short-lived workload capabilities from Buzz's NIP-98 community
   session, resolve current repository authority, and add OCI isolation.
 - Remaining before public release: exhaustive desktop Playwright/crash-matrix acceptance.

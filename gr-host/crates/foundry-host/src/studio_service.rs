@@ -20,8 +20,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use foundry_ir::{
-    ArchitectureLayoutV1, ArchitectureRequest, CriticVerdictV1, Ir, RationaleEntryV1,
-    StudioBindingV1, StudioCommandV1, StudioOperationV1, StudioRationaleV1,
+    ArchitectureLayoutV1, ArchitectureRequest, CriticVerdictV1, Ir, ProposalStatusV1,
+    RationaleEntryV1, StudioBindingV1, StudioCommandV1, StudioOperationV1, StudioRationaleV1,
 };
 use graphreact_persistence::RunId;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
@@ -266,7 +266,7 @@ enum GenerativeCommandKind {
     ResolveDiagnostics,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct GenerativeRequest {
     expected_head_digest: String,
@@ -274,6 +274,40 @@ struct GenerativeRequest {
     #[serde(default)]
     selected_nodes: Vec<String>,
     instruction: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GenerativeOperationRequest {
+    run_id: String,
+    proposal_id: String,
+    expected_head_digest: String,
+    kind: GenerativeCommandKind,
+    #[serde(default)]
+    selected_nodes: Vec<String>,
+    instruction: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RebaseOperationRequest {
+    run_id: String,
+    target_proposal_id: String,
+    onto_proposal_id: String,
+    expected_target_digest: String,
+    expected_onto_digest: String,
+    instruction: String,
+}
+
+impl GenerativeOperationRequest {
+    fn command(&self) -> GenerativeRequest {
+        GenerativeRequest {
+            expected_head_digest: self.expected_head_digest.clone(),
+            kind: self.kind.clone(),
+            selected_nodes: self.selected_nodes.clone(),
+            instruction: self.instruction.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1647,6 +1681,15 @@ async fn run_architect_studio(
         .proposal_id
         .clone();
     let mut current = studio::snapshot(&state.durability_dir, &created.run_id, &proposal_id)?;
+    if let Some(operation_id) = room_operation_id {
+        ArchitectureRoomLedger::open(&state.durability_dir)?.bind_proposal(
+            operation_id,
+            &created.run_id,
+            &proposal_id,
+            &current.revision.revision_id,
+            &current.revision.semantic_digest,
+        )?;
+    }
     for review_round in 1..=3 {
         if let Some(operation_id) = room_operation_id {
             let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
@@ -1943,19 +1986,25 @@ fn spawn_architecture_operation(
                 );
             }
             Err(error) => {
-                if let Some(encoded) = error.body.message.strip_prefix("ARCHITECT_QUESTION:") {
-                    if let Ok(question) = serde_json::from_str::<Value>(encoded) {
-                        if let (Some(question_id), Some(prompt)) = (
-                            question.get("question_id").and_then(Value::as_str),
-                            question.get("prompt").and_then(Value::as_str),
-                        ) {
-                            let _ = ledger.wait_for_input(
-                                &operation_id,
-                                question_id,
-                                prompt,
-                                task_state.architect_runtime.identity(),
-                            );
-                            return;
+                let can_pause_for_question = ledger
+                    .get(&operation_id)
+                    .map(|operation| operation.proposal_id.is_none())
+                    .unwrap_or(false);
+                if can_pause_for_question {
+                    if let Some(encoded) = error.body.message.strip_prefix("ARCHITECT_QUESTION:") {
+                        if let Ok(question) = serde_json::from_str::<Value>(encoded) {
+                            if let (Some(question_id), Some(prompt)) = (
+                                question.get("question_id").and_then(Value::as_str),
+                                question.get("prompt").and_then(Value::as_str),
+                            ) {
+                                let _ = ledger.wait_for_input(
+                                    &operation_id,
+                                    question_id,
+                                    prompt,
+                                    task_state.architect_runtime.identity(),
+                                );
+                                return;
+                            }
                         }
                     }
                 }
@@ -1977,6 +2026,423 @@ fn spawn_architecture_operation(
             }
         }
     });
+}
+
+fn spawn_generative_operation(
+    task_state: Arc<ServiceState>,
+    operation_id: String,
+    capability: Capability,
+    request: GenerativeOperationRequest,
+    idempotency_key: String,
+) {
+    let task_actor = capability.actor_pubkey.clone();
+    tokio::spawn(async move {
+        let ledger = match ArchitectureRoomLedger::open(&task_state.durability_dir) {
+            Ok(ledger) => ledger,
+            Err(_) => return,
+        };
+        if ledger
+            .transition(
+                &operation_id,
+                ArchitectureOperationStateV1::Architecting,
+                "The architect is generating a proposal-scoped semantic revision",
+                &task_state.service_pubkey,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let command = request.command();
+        match run_generate_revision(
+            Arc::clone(&task_state),
+            capability,
+            request.run_id,
+            request.proposal_id,
+            command,
+            idempotency_key,
+            Some(&operation_id),
+        )
+        .await
+        {
+            Ok(projection) => {
+                let result = match serde_json::to_value(&projection) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = ledger.transition(
+                            &operation_id,
+                            ArchitectureOperationStateV1::Failed,
+                            &error.to_string(),
+                            &task_state.service_pubkey,
+                        );
+                        return;
+                    }
+                };
+                let _ = ledger.complete(
+                    &operation_id,
+                    &projection.snapshot.state.run_id,
+                    &projection.snapshot.proposal.proposal_id,
+                    &projection.snapshot.revision.revision_id,
+                    &projection.snapshot.revision.semantic_digest,
+                    result,
+                    &task_state.service_pubkey,
+                );
+            }
+            Err(error) => {
+                let _ = ledger.append_event(
+                    &operation_id,
+                    ArchitectureRoomActorKindV1::Human,
+                    &task_actor,
+                    ArchitectureRoomPayloadV1::Message {
+                        message:
+                            "The accepted proposal head remains unchanged and available for retry."
+                                .into(),
+                    },
+                );
+                let _ = ledger.transition(
+                    &operation_id,
+                    ArchitectureOperationStateV1::Failed,
+                    &error.body.message,
+                    &task_state.service_pubkey,
+                );
+            }
+        }
+    });
+}
+
+async fn submit_generative_operation(
+    State(state): State<Arc<ServiceState>>,
+    headers: HeaderMap,
+    Json(request): Json<GenerativeOperationRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let current = studio::snapshot(&state.durability_dir, &request.run_id, &request.proposal_id)?;
+    let capability = capability(
+        &state,
+        &headers,
+        &current.state.binding.repository_coordinate,
+        "edit",
+    )?;
+    if request.instruction.trim().is_empty() || request.selected_nodes.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMMAND",
+            "generative commands require selected nodes and an instruction",
+        ));
+    }
+    if current.proposal.head_semantic_digest != request.expected_head_digest {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "REVISION_CONFLICT",
+            "generative command targets a stale proposal head",
+        ));
+    }
+    let idempotency_key = operation_key(&headers)?.to_owned();
+    let request_value = serde_json::to_value(&request).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMMAND",
+            error.to_string(),
+        )
+    })?;
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let (created_operation, created) = ledger.create(
+        &current.state.binding.repository_coordinate,
+        &idempotency_key,
+        &request_value,
+        ArchitectureOperationKindV1::GenerativeEdit,
+        &capability.actor_pubkey,
+        capability.approval_threshold,
+        capability.operations.iter().cloned().collect(),
+        capability.human,
+    )?;
+    let operation = if created {
+        match ledger.bind_proposal(
+            &created_operation.operation_id,
+            &request.run_id,
+            &request.proposal_id,
+            &current.revision.revision_id,
+            &request.expected_head_digest,
+        ) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let _ = ledger.transition(
+                    &created_operation.operation_id,
+                    ArchitectureOperationStateV1::Failed,
+                    &error.to_string(),
+                    &state.service_pubkey,
+                );
+                return Err(error.into());
+            }
+        }
+    } else {
+        created_operation
+    };
+    if created {
+        spawn_generative_operation(
+            Arc::clone(&state),
+            operation.operation_id.clone(),
+            capability,
+            request,
+            idempotency_key,
+        );
+    }
+    Ok((
+        if created {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(serde_json::to_value(operation).map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERVICE_NOT_READY",
+                error.to_string(),
+            )
+        })?),
+    ))
+}
+
+fn spawn_rebase_operation(
+    task_state: Arc<ServiceState>,
+    operation_id: String,
+    capability: Capability,
+    request: RebaseOperationRequest,
+    idempotency_key: String,
+) {
+    tokio::spawn(async move {
+        let ledger = match ArchitectureRoomLedger::open(&task_state.durability_dir) {
+            Ok(ledger) => ledger,
+            Err(_) => return,
+        };
+        if ledger
+            .transition(
+                &operation_id,
+                ArchitectureOperationStateV1::Architecting,
+                "The architect is rebasing the stale proposal onto the selected current proposal",
+                &task_state.service_pubkey,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let result = async {
+            let target = studio::snapshot(
+                &task_state.durability_dir,
+                &request.run_id,
+                &request.target_proposal_id,
+            )?;
+            let onto = studio::snapshot(
+                &task_state.durability_dir,
+                &request.run_id,
+                &request.onto_proposal_id,
+            )?;
+            if target.revision.semantic_digest != request.expected_target_digest
+                || onto.revision.semantic_digest != request.expected_onto_digest
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "REVISION_CONFLICT",
+                    "a proposal head changed before rebase execution",
+                ));
+            }
+            if target.proposal.status != ProposalStatusV1::Stale
+                || onto.proposal.status != ProposalStatusV1::Approved
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "STALE_BASE",
+                    "rebase requires a stale source proposal and the current approved proposal",
+                ));
+            }
+            let rebased = studio::create_proposal(
+                &task_state.durability_dir,
+                &request.run_id,
+                &request.onto_proposal_id,
+                &request.expected_onto_digest,
+                &capability.actor_pubkey,
+                &format!("Rebase of {}", target.proposal.title),
+                &format!("{idempotency_key}:branch"),
+            )?;
+            ledger.bind_proposal(
+                &operation_id,
+                &request.run_id,
+                &rebased.proposal.proposal_id,
+                &rebased.revision.revision_id,
+                &rebased.revision.semantic_digest,
+            )?;
+            let target_ir = serde_json::to_string(&target.ir).map_err(|error| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "SERVICE_NOT_READY",
+                    error.to_string(),
+                )
+            })?;
+            if target_ir.len() > 256 * 1024 {
+                return Err(ApiError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "INVALID_COMMAND",
+                    "the stale proposal is too large for bounded rebase context",
+                ));
+            }
+            let command = GenerativeRequest {
+                expected_head_digest: rebased.revision.semantic_digest.clone(),
+                kind: GenerativeCommandKind::RewriteSubtree,
+                selected_nodes: vec![rebased.ir.root.clone()],
+                instruction: format!(
+                    "{}. Reapply the intent of this stale proposal while preserving the current external contracts and boundary locks. Stale proposal IR: {target_ir}",
+                    request.instruction
+                ),
+            };
+            run_generate_revision(
+                Arc::clone(&task_state),
+                capability,
+                request.run_id,
+                rebased.proposal.proposal_id,
+                command,
+                format!("{idempotency_key}:rebase"),
+                Some(&operation_id),
+            )
+            .await
+        }
+        .await;
+        match result {
+            Ok(projection) => {
+                if let Ok(result) = serde_json::to_value(&projection) {
+                    let _ = ledger.complete(
+                        &operation_id,
+                        &projection.snapshot.state.run_id,
+                        &projection.snapshot.proposal.proposal_id,
+                        &projection.snapshot.revision.revision_id,
+                        &projection.snapshot.revision.semantic_digest,
+                        result,
+                        &task_state.service_pubkey,
+                    );
+                }
+            }
+            Err(error) => {
+                let _ = ledger.transition(
+                    &operation_id,
+                    ArchitectureOperationStateV1::Failed,
+                    &error.body.message,
+                    &task_state.service_pubkey,
+                );
+            }
+        }
+    });
+}
+
+async fn submit_rebase_operation(
+    State(state): State<Arc<ServiceState>>,
+    headers: HeaderMap,
+    Json(request): Json<RebaseOperationRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if request.target_proposal_id == request.onto_proposal_id
+        || request.instruction.trim().is_empty()
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMMAND",
+            "rebase requires distinct proposals and a non-empty instruction",
+        ));
+    }
+    let target = studio::snapshot(
+        &state.durability_dir,
+        &request.run_id,
+        &request.target_proposal_id,
+    )?;
+    let onto = studio::snapshot(
+        &state.durability_dir,
+        &request.run_id,
+        &request.onto_proposal_id,
+    )?;
+    let capability = capability(
+        &state,
+        &headers,
+        &target.state.binding.repository_coordinate,
+        "edit",
+    )?;
+    if target.revision.semantic_digest != request.expected_target_digest
+        || onto.revision.semantic_digest != request.expected_onto_digest
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "REVISION_CONFLICT",
+            "a proposal head changed before rebase submission",
+        ));
+    }
+    if target.proposal.status != ProposalStatusV1::Stale
+        || onto.proposal.status != ProposalStatusV1::Approved
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "STALE_BASE",
+            "rebase requires a stale source proposal and the current approved proposal",
+        ));
+    }
+    let idempotency_key = operation_key(&headers)?.to_owned();
+    let request_value = serde_json::to_value(&request).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMMAND",
+            error.to_string(),
+        )
+    })?;
+    let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+    let (created_operation, created) = ledger.create(
+        &target.state.binding.repository_coordinate,
+        &idempotency_key,
+        &request_value,
+        ArchitectureOperationKindV1::Rebase,
+        &capability.actor_pubkey,
+        capability.approval_threshold,
+        capability.operations.iter().cloned().collect(),
+        capability.human,
+    )?;
+    let operation = if created {
+        let operation = match ledger.bind_proposal(
+            &created_operation.operation_id,
+            &request.run_id,
+            &request.target_proposal_id,
+            &target.revision.revision_id,
+            &request.expected_target_digest,
+        ) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let _ = ledger.transition(
+                    &created_operation.operation_id,
+                    ArchitectureOperationStateV1::Failed,
+                    &error.to_string(),
+                    &state.service_pubkey,
+                );
+                return Err(error.into());
+            }
+        };
+        ledger.link_room_branch(&operation.operation_id, &request.target_proposal_id, None)?
+    } else {
+        created_operation
+    };
+    if created {
+        spawn_rebase_operation(
+            Arc::clone(&state),
+            operation.operation_id.clone(),
+            capability,
+            request,
+            idempotency_key,
+        );
+    }
+    Ok((
+        if created {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(serde_json::to_value(operation).map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERVICE_NOT_READY",
+                error.to_string(),
+            )
+        })?),
+    ))
 }
 
 async fn get_architecture_operation(
@@ -2009,6 +2475,18 @@ async fn list_architecture_operations(
     })))
 }
 
+fn persist_bound_room_transcript(
+    state: &ServiceState,
+    ledger: &ArchitectureRoomLedger,
+    operation_id: &str,
+) -> Result<(), ApiError> {
+    let transcript = ledger.transcript(operation_id)?;
+    if transcript.operation.studio_run_id.is_some() && transcript.operation.proposal_id.is_some() {
+        studio::persist_room_transcript(&state.durability_dir, &transcript)?;
+    }
+    Ok(())
+}
+
 async fn list_architecture_room_events(
     State(state): State<Arc<ServiceState>>,
     Path(operation_id): Path<String>,
@@ -2018,6 +2496,7 @@ async fn list_architecture_room_events(
     let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
     let operation = ledger.get(&operation_id)?;
     capability(&state, &headers, &operation.repository_coordinate, "read")?;
+    persist_bound_room_transcript(&state, &ledger, &operation_id)?;
     let events = ledger.events(&operation_id, query.after, query.limit)?;
     Ok(Json(json!({
         "protocol_version": 1,
@@ -2081,6 +2560,7 @@ async fn submit_architecture_guidance(
             content: request.content,
         },
     )?;
+    persist_bound_room_transcript(&state, &ledger, &operation_id)?;
     Ok(Json(serde_json::to_value(event).map_err(|error| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2118,6 +2598,7 @@ async fn cancel_architecture_operation(
     if let Some(job_id) = job_id {
         let _ = tokio::task::spawn_blocking(move || runtime.cancel(&job_id)).await;
     }
+    persist_bound_room_transcript(&state, &ledger, &operation_id)?;
     Ok(Json(serde_json::to_value(cancelled).map_err(|error| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2147,28 +2628,62 @@ async fn answer_architecture_question(
     )?;
     let recovered =
         ledger.answer_question(&operation_id, &request.question_id, &state.service_pubkey)?;
-    let mut architect_request: ArchitectStudioRequest = serde_json::from_value(recovered.request)
-        .map_err(|error| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SERVICE_NOT_READY",
-            format!("persisted architecture request is invalid: {error}"),
-        )
-    })?;
-    architect_request.policy_constraints.push(format!(
-        "Human answer to question {}: {}",
-        request.question_id, request.content
-    ));
-    spawn_architecture_operation(
-        Arc::clone(&state),
-        operation_id,
-        capability,
-        architect_request,
-        format!(
-            "{}:answer:{}",
-            recovered.idempotency_key, request.message_id
-        ),
+    let resume_key = format!(
+        "{}:answer:{}",
+        recovered.idempotency_key, request.message_id
     );
+    match recovered.operation.kind {
+        ArchitectureOperationKindV1::InitialArchitecture => {
+            let mut architect_request: ArchitectStudioRequest =
+                serde_json::from_value(recovered.request).map_err(|error| {
+                    ApiError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_NOT_READY",
+                        format!("persisted architecture request is invalid: {error}"),
+                    )
+                })?;
+            architect_request.policy_constraints.push(format!(
+                "Human answer to question {}: {}",
+                request.question_id, request.content
+            ));
+            spawn_architecture_operation(
+                Arc::clone(&state),
+                operation_id.clone(),
+                capability,
+                architect_request,
+                resume_key,
+            );
+        }
+        ArchitectureOperationKindV1::GenerativeEdit => {
+            let mut generative_request: GenerativeOperationRequest =
+                serde_json::from_value(recovered.request).map_err(|error| {
+                    ApiError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_NOT_READY",
+                        format!("persisted generative request is invalid: {error}"),
+                    )
+                })?;
+            generative_request.instruction.push_str(&format!(
+                "\nHuman answer to question {}: {}",
+                request.question_id, request.content
+            ));
+            spawn_generative_operation(
+                Arc::clone(&state),
+                operation_id.clone(),
+                capability,
+                generative_request,
+                resume_key,
+            );
+        }
+        ArchitectureOperationKindV1::CriticRepair | ArchitectureOperationKindV1::Rebase => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "INVALID_COMMAND",
+                "this operation kind cannot resume from a question",
+            ));
+        }
+    }
+    persist_bound_room_transcript(&state, &ledger, &operation_id)?;
     Ok(Json(json!({"accepted": true})))
 }
 
@@ -2201,6 +2716,16 @@ async fn stream_architecture_room_events(
             };
             let events = ledger.events(&operation_id, cursor, 1).unwrap_or_default();
             if let Some(room_event) = events.into_iter().next() {
+                if let Err(error) = persist_bound_room_transcript(&state, &ledger, &operation_id) {
+                    let event = SseEvent::default()
+                        .event("foundry-architecture-room")
+                        .json_data(json!({
+                            "code": error.body.code,
+                            "message": error.body.message,
+                        }))
+                        .unwrap_or_else(|_| SseEvent::default().event("foundry-architecture-room"));
+                    return Some((Ok(event), (state, operation_id, cursor, true)));
+                }
                 let next_cursor = room_event.sequence;
                 let terminal = ledger
                     .get(&operation_id)
@@ -2420,6 +2945,37 @@ async fn generate_revision(
     headers: HeaderMap,
     Json(request): Json<GenerativeRequest>,
 ) -> Result<Json<StudioProjection>, ApiError> {
+    let current = studio::snapshot(&state.durability_dir, &run_id, &proposal_id)?;
+    let capability = capability(
+        &state,
+        &headers,
+        &current.state.binding.repository_coordinate,
+        "edit",
+    )?;
+    let operation = operation_key(&headers)?.to_owned();
+    run_generate_revision(
+        state,
+        capability,
+        run_id,
+        proposal_id,
+        request,
+        operation,
+        None,
+    )
+    .await
+    .map(Json)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_generate_revision(
+    state: Arc<ServiceState>,
+    capability: Capability,
+    run_id: String,
+    proposal_id: String,
+    request: GenerativeRequest,
+    operation: String,
+    room_operation_id: Option<&str>,
+) -> Result<StudioProjection, ApiError> {
     if request.instruction.trim().is_empty() || request.selected_nodes.is_empty() {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -2428,12 +2984,6 @@ async fn generate_revision(
         ));
     }
     let current = studio::snapshot(&state.durability_dir, &run_id, &proposal_id)?;
-    let capability = capability(
-        &state,
-        &headers,
-        &current.state.binding.repository_coordinate,
-        "edit",
-    )?;
     if current.proposal.head_semantic_digest != request.expected_head_digest {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -2454,7 +3004,6 @@ async fn generate_revision(
             "generative command selected an unknown node",
         ));
     }
-    let operation = operation_key(&headers)?.to_owned();
     let operation_file_key = format!("{:x}", sha2::Sha256::digest(operation.as_bytes()));
     let output = state
         .durability_dir
@@ -2500,13 +3049,29 @@ async fn generate_revision(
         existing_ir: Some(current.ir.clone()),
     };
     let architect_runtime = Arc::clone(&state.architect_runtime);
-    let architect_run_id = run_id.clone();
+    let architect_run_id = format!("{run_id}:generative:{operation}");
     let output_for_agent = output.clone();
+    let room_operation = room_operation_id.map(str::to_owned);
+    let room_durability = state.durability_dir.clone();
+    let architect_identity = state.architect_runtime.identity().to_owned();
     let candidate = tokio::task::spawn_blocking(move || {
+        let event_sink = |event: Value| {
+            if let Some(operation_id) = &room_operation {
+                project_agent_runtime_event(
+                    &room_durability,
+                    operation_id,
+                    ArchitectureRoomActorKindV1::Architect,
+                    &architect_identity,
+                    event,
+                );
+            }
+        };
         let agent = crate::architect::RuntimeArchitectureAgent {
             runtime: architect_runtime.as_ref(),
             run_id: &architect_run_id,
-            event_sink: None,
+            event_sink: room_operation
+                .as_ref()
+                .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
         };
         crate::architect::architect(&agent, &architecture_request, &output_for_agent)
     })
@@ -2519,6 +3084,14 @@ async fn generate_revision(
         )
     })?
     .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "COMPILER_REJECTED", error))?;
+    if let Some(operation_id) = room_operation_id {
+        ArchitectureRoomLedger::open(&state.durability_dir)?.transition(
+            operation_id,
+            ArchitectureOperationStateV1::Compiling,
+            "The generated proposal satisfies the Foundry IR compiler",
+            &state.service_pubkey,
+        )?;
+    }
     let mut rationale = current.rationale.clone();
     for node in &request.selected_nodes {
         rationale.entries.insert(
@@ -2541,68 +3114,173 @@ async fn generate_revision(
         &operation,
     )?;
 
-    let critic_runtime = Arc::clone(&state.critic_runtime);
-    let critic_run_id = run_id.clone();
-    let critic_job_id = format!(
-        "studio-critic-{:x}",
-        sha2::Sha256::digest(format!("{run_id}:{}", next.revision.semantic_digest))
-    );
-    let critic_payload = json!({
-        "protocol_version": 1,
-        "job_id": &critic_job_id,
-        "ir": &next.ir,
-        "semantic_digest": &next.revision.semantic_digest,
-        "rationale": &next.rationale,
-        "locks": &next.locks,
-    });
-    let critic = tokio::task::spawn_blocking(move || {
-        critic_runtime.execute(&AgentJobRequestV1::new(
-            critic_job_id,
-            critic_run_id,
-            AgentRoleV1::Critic,
-            "architecture_review",
-            critic_payload,
-        ))
-    })
-    .await
-    .map_err(|error| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SERVICE_NOT_READY",
-            error.to_string(),
-        )
-    })?
-    .map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "SERVICE_NOT_READY", error))?;
-    let verdict = match critic.get("verdict").and_then(Value::as_str) {
-        Some("approved") => CriticVerdictV1::Approved,
-        Some("changes_requested") => CriticVerdictV1::ChangesRequested,
-        _ => {
+    let mut candidate_snapshot = next;
+    for review_round in 1..=3 {
+        if let Some(operation_id) = room_operation_id {
+            let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
+            ledger.set_repair_round(operation_id, review_round - 1)?;
+            ledger.transition(
+                operation_id,
+                ArchitectureOperationStateV1::CriticReview,
+                &format!("The independent critic is reviewing round {review_round}"),
+                &state.service_pubkey,
+            )?;
+        }
+        let (verdict, diagnostics) =
+            execute_room_critic(&state, &run_id, &candidate_snapshot, room_operation_id).await?;
+        if let Some(operation_id) = room_operation_id {
+            ArchitectureRoomLedger::open(&state.durability_dir)?.append_event(
+                operation_id,
+                ArchitectureRoomActorKindV1::Critic,
+                state.critic_runtime.identity(),
+                ArchitectureRoomPayloadV1::CriticVerdict {
+                    verdict: match verdict {
+                        CriticVerdictV1::Approved => "approved",
+                        CriticVerdictV1::ChangesRequested => "changes_requested",
+                    }
+                    .into(),
+                    diagnostics: diagnostics.clone(),
+                },
+            )?;
+        }
+        let approved = verdict == CriticVerdictV1::Approved;
+        let reviewed = studio::record_critic_review(
+            &state.durability_dir,
+            &run_id,
+            &proposal_id,
+            &candidate_snapshot.revision.semantic_digest,
+            &format!("foundry-critic:{}", state.service_pubkey),
+            verdict,
+            diagnostics.clone(),
+            &format!("{operation}:critic:{review_round}"),
+        )?;
+        if approved {
+            return Ok(projection(&state, &capability, reviewed));
+        }
+        if review_round == 3 {
             return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "COMPILER_REJECTED",
+                format!(
+                    "independent critic still requested changes after three rounds: {}",
+                    diagnostics.join("; ")
+                ),
+            ));
+        }
+        if let Some(operation_id) = room_operation_id {
+            ArchitectureRoomLedger::open(&state.durability_dir)?.transition(
+                operation_id,
+                ArchitectureOperationStateV1::Repairing,
+                &format!("The architect is addressing critic feedback for round {review_round}"),
+                &state.service_pubkey,
+            )?;
+        }
+        let mut languages = reviewed
+            .ir
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                node.implementation
+                    .language
+                    .clone()
+                    .or_else(|| reviewed.ir.spec.language.clone())
+            })
+            .collect::<Vec<_>>();
+        languages.sort();
+        languages.dedup();
+        let checkpoint_guidance = match room_operation_id {
+            Some(operation_id) => ArchitectureRoomLedger::open(&state.durability_dir)?
+                .checkpoint_guidance(operation_id)?,
+            None => Vec::new(),
+        };
+        let mut policy_constraints = vec![
+            "Preserve every Architecture Studio boundary lock".into(),
+            "Keep changes inside the selected proposal subtree and return complete strict IR v1"
+                .into(),
+        ];
+        policy_constraints.extend(
+            checkpoint_guidance
+                .into_iter()
+                .map(|guidance| format!("Human checkpoint guidance: {guidance}")),
+        );
+        let repair_request = ArchitectureRequest {
+            architecture_version: 1,
+            product_spec: format!(
+                "Repair the {:?} proposal after critic diagnostics: {}",
+                request.kind,
+                diagnostics.join("; ")
+            ),
+            repository: reviewed.state.binding.repository_coordinate.clone(),
+            base_revision: reviewed.state.binding.base_commit.clone(),
+            allowed_languages: languages,
+            policy_constraints,
+            existing_ir: Some(reviewed.ir.clone()),
+        };
+        let repair_output = state
+            .durability_dir
+            .join("agent-candidates")
+            .join(format!("{operation_file_key}-repair-{review_round}.json"));
+        let repair_runtime = Arc::clone(&state.architect_runtime);
+        let repair_run_id = format!("{run_id}:generative-repair:{review_round}");
+        let repair_room_operation = room_operation_id.map(str::to_owned);
+        let repair_room_durability = state.durability_dir.clone();
+        let repair_identity = state.architect_runtime.identity().to_owned();
+        let repaired_candidate = tokio::task::spawn_blocking(move || {
+            let event_sink = |event: Value| {
+                if let Some(operation_id) = &repair_room_operation {
+                    project_agent_runtime_event(
+                        &repair_room_durability,
+                        operation_id,
+                        ArchitectureRoomActorKindV1::Architect,
+                        &repair_identity,
+                        event,
+                    );
+                }
+            };
+            let agent = crate::architect::RuntimeArchitectureAgent {
+                runtime: repair_runtime.as_ref(),
+                run_id: &repair_run_id,
+                event_sink: repair_room_operation
+                    .as_ref()
+                    .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
+            };
+            crate::architect::architect(&agent, &repair_request, &repair_output)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "SERVICE_NOT_READY",
-                "critic returned an invalid verdict",
-            ))
+                error.to_string(),
+            )
+        })?
+        .map_err(|error| {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "COMPILER_REJECTED", error)
+        })?;
+        if let Some(operation_id) = room_operation_id {
+            ArchitectureRoomLedger::open(&state.durability_dir)?.transition(
+                operation_id,
+                ArchitectureOperationStateV1::Compiling,
+                "The repaired generative candidate satisfies the Foundry compiler",
+                &state.service_pubkey,
+            )?;
         }
-    };
-    let diagnostics = critic
-        .get("diagnostics")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
-    let reviewed = studio::record_critic_review(
-        &state.durability_dir,
-        &run_id,
-        &proposal_id,
-        &next.revision.semantic_digest,
-        &format!("foundry-critic:{}", state.service_pubkey),
-        verdict,
-        diagnostics,
-        &format!("{operation}:critic"),
-    )?;
-    Ok(Json(projection(&state, &capability, reviewed)))
+        candidate_snapshot = studio::apply_generated_candidate(
+            &state.durability_dir,
+            &run_id,
+            &proposal_id,
+            &reviewed.revision.semantic_digest,
+            &format!("foundry-architect:{}", state.service_pubkey),
+            repaired_candidate,
+            reviewed.rationale.clone(),
+            &format!("{operation}:repair:{review_round}"),
+        )?;
+    }
+    Err(ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "SERVICE_NOT_READY",
+        "generative critic loop ended without a terminal decision",
+    ))
 }
 
 fn approval_tags(event_json: &str) -> Result<(String, HashMap<String, String>), ApiError> {
@@ -3231,6 +3909,14 @@ pub fn serve(args: &[String]) -> Result<(), String> {
             "/v1/studio-operations/architect",
             post(submit_architecture_operation),
         )
+        .route(
+            "/v1/studio-operations/generate",
+            post(submit_generative_operation),
+        )
+        .route(
+            "/v1/studio-operations/rebase",
+            post(submit_rebase_operation),
+        )
         .route("/v1/studio-operations", get(list_architecture_operations))
         .route(
             "/v1/studio-operations/{operation_id}",
@@ -3310,21 +3996,6 @@ pub fn serve(args: &[String]) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async move {
         for recovered in recoverable_operations {
-            let request: ArchitectStudioRequest = match serde_json::from_value(recovered.request) {
-                Ok(request) => request,
-                Err(error) => {
-                    let _ =
-                        ArchitectureRoomLedger::open(&state.durability_dir).and_then(|ledger| {
-                            ledger.transition(
-                                &recovered.operation.operation_id,
-                                ArchitectureOperationStateV1::Indeterminate,
-                                &format!("persisted architecture request is invalid: {error}"),
-                                &state.service_pubkey,
-                            )
-                        });
-                    continue;
-                }
-            };
             let capability = Capability {
                 community_id: state.community_id.clone(),
                 repository_coordinate: recovered.operation.repository_coordinate.clone(),
@@ -3339,13 +4010,64 @@ pub fn serve(args: &[String]) -> Result<(), String> {
                 human: recovered.operation.human_actor,
                 approval_threshold: recovered.operation.approval_threshold,
             };
-            spawn_architecture_operation(
-                Arc::clone(&state),
-                recovered.operation.operation_id,
-                capability,
-                request,
-                recovered.idempotency_key,
-            );
+            let operation_id = recovered.operation.operation_id.clone();
+            let invalid_request = |message: String| {
+                let _ = ArchitectureRoomLedger::open(&state.durability_dir).and_then(|ledger| {
+                    ledger.transition(
+                        &operation_id,
+                        ArchitectureOperationStateV1::Indeterminate,
+                        &message,
+                        &state.service_pubkey,
+                    )
+                });
+            };
+            match recovered.operation.kind {
+                ArchitectureOperationKindV1::InitialArchitecture => {
+                    match serde_json::from_value::<ArchitectStudioRequest>(recovered.request) {
+                        Ok(request) => spawn_architecture_operation(
+                            Arc::clone(&state),
+                            operation_id,
+                            capability,
+                            request,
+                            recovered.idempotency_key,
+                        ),
+                        Err(error) => invalid_request(format!(
+                            "persisted architecture request is invalid: {error}"
+                        )),
+                    }
+                }
+                ArchitectureOperationKindV1::GenerativeEdit => {
+                    match serde_json::from_value::<GenerativeOperationRequest>(recovered.request) {
+                        Ok(request) => spawn_generative_operation(
+                            Arc::clone(&state),
+                            operation_id,
+                            capability,
+                            request,
+                            recovered.idempotency_key,
+                        ),
+                        Err(error) => invalid_request(format!(
+                            "persisted generative request is invalid: {error}"
+                        )),
+                    }
+                }
+                ArchitectureOperationKindV1::Rebase => {
+                    match serde_json::from_value::<RebaseOperationRequest>(recovered.request) {
+                        Ok(request) => spawn_rebase_operation(
+                            Arc::clone(&state),
+                            operation_id,
+                            capability,
+                            request,
+                            recovered.idempotency_key,
+                        ),
+                        Err(error) => {
+                            invalid_request(format!("persisted rebase request is invalid: {error}"))
+                        }
+                    }
+                }
+                ArchitectureOperationKindV1::CriticRepair => {
+                    invalid_request("this critic repair operation cannot yet be recovered".into())
+                }
+            }
         }
         for handoff in handoffs_to_recover {
             tokio::spawn(monitor_build(state.clone(), handoff));

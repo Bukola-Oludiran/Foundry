@@ -171,6 +171,10 @@ pub struct ArchitectureOperationV1 {
     pub base_revision_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_head_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_proposal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
     pub kind: ArchitectureOperationKindV1,
     pub state: ArchitectureOperationStateV1,
     pub architect_job_id: String,
@@ -225,6 +229,12 @@ pub struct RecoverableArchitectureOperationV1 {
     pub operation: ArchitectureOperationV1,
     pub idempotency_key: String,
     pub request: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchitectureRoomTranscriptV1 {
+    pub operation: ArchitectureOperationV1,
+    pub events: Vec<ArchitectureRoomEventV1>,
 }
 
 pub struct ArchitectureRoomLedger {
@@ -287,6 +297,8 @@ impl ArchitectureRoomLedger {
             proposal_id: None,
             base_revision_id: None,
             expected_head_digest: None,
+            parent_proposal_id: None,
+            parent_event_id: None,
             kind,
             state: ArchitectureOperationStateV1::Queued,
             architect_job_id: format!("studio-architect-{operation_id}-1"),
@@ -328,6 +340,61 @@ impl ArchitectureRoomLedger {
         Ok(self.read(operation_id)?.operation)
     }
 
+    pub fn bind_proposal(
+        &self,
+        operation_id: &str,
+        studio_run_id: &str,
+        proposal_id: &str,
+        base_revision_id: &str,
+        expected_head_digest: &str,
+    ) -> Result<ArchitectureOperationV1, ArchitectureRoomError> {
+        validate_text(studio_run_id, "Studio run id", 512)?;
+        validate_text(proposal_id, "proposal id", 512)?;
+        validate_text(base_revision_id, "base revision id", 512)?;
+        validate_text(expected_head_digest, "expected head digest", 128)?;
+        let _guard = mutation_guard()?;
+        let mut stored = self.read(operation_id)?;
+        for path in self.record_paths()? {
+            let other = read_record(&path)?.operation;
+            if other.operation_id != operation_id
+                && other.repository_coordinate == stored.operation.repository_coordinate
+                && other.proposal_id.as_deref() == Some(proposal_id)
+                && !other.state.terminal()
+            {
+                return Err(ArchitectureRoomError::InvalidTransition(format!(
+                    "architecture operation {} is already active for proposal {proposal_id}",
+                    other.operation_id
+                )));
+            }
+        }
+        stored.operation.studio_run_id = Some(studio_run_id.to_owned());
+        stored.operation.proposal_id = Some(proposal_id.to_owned());
+        stored.operation.base_revision_id = Some(base_revision_id.to_owned());
+        stored.operation.expected_head_digest = Some(expected_head_digest.to_owned());
+        stored.operation.updated_at_ms = now_ms();
+        replace_synced(&self.path(operation_id), &stored)?;
+        Ok(stored.operation)
+    }
+
+    pub fn link_room_branch(
+        &self,
+        operation_id: &str,
+        parent_proposal_id: &str,
+        parent_event_id: Option<&str>,
+    ) -> Result<ArchitectureOperationV1, ArchitectureRoomError> {
+        validate_text(parent_proposal_id, "parent proposal id", 512)?;
+        if let Some(event_id) = parent_event_id {
+            validate_text(event_id, "parent event id", 512)?;
+        }
+        let _guard = mutation_guard()?;
+        let mut stored = self.read(operation_id)?;
+        stored.operation.parent_proposal_id = Some(parent_proposal_id.to_owned());
+        stored.operation.parent_event_id = parent_event_id.map(str::to_owned);
+        stored.operation.updated_at_ms = now_ms();
+        replace_synced(&self.path(operation_id), &stored)?;
+        Ok(stored.operation)
+    }
+
     pub fn list_for_repository(
         &self,
         repository_coordinate: &str,
@@ -357,6 +424,17 @@ impl ArchitectureRoomLedger {
             .filter(|event| event.sequence > after)
             .take(limit)
             .collect())
+    }
+
+    pub fn transcript(
+        &self,
+        operation_id: &str,
+    ) -> Result<ArchitectureRoomTranscriptV1, ArchitectureRoomError> {
+        let stored = self.read(operation_id)?;
+        Ok(ArchitectureRoomTranscriptV1 {
+            operation: stored.operation,
+            events: stored.events,
+        })
     }
 
     pub fn checkpoint_guidance(
@@ -1180,6 +1258,85 @@ mod tests {
             ArchitectureOperationStateV1::Queued
         );
         assert_eq!(ledger.recoverable().unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn proposal_binding_serializes_one_operation_but_allows_independent_proposals() {
+        let root = temporary_root();
+        let ledger = ArchitectureRoomLedger::open(&root).unwrap();
+        let (first, _) = ledger
+            .create(
+                "30617:owner:repo",
+                "first",
+                &serde_json::json!({"proposal": "one"}),
+                ArchitectureOperationKindV1::GenerativeEdit,
+                "human",
+                1,
+                vec!["read".into(), "edit".into()],
+                true,
+            )
+            .unwrap();
+        ledger
+            .bind_proposal(
+                &first.operation_id,
+                "run",
+                "proposal-one",
+                "revision",
+                "digest",
+            )
+            .unwrap();
+        let (conflict, _) = ledger
+            .create(
+                "30617:owner:repo",
+                "conflict",
+                &serde_json::json!({"proposal": "one-again"}),
+                ArchitectureOperationKindV1::GenerativeEdit,
+                "human",
+                1,
+                vec!["read".into(), "edit".into()],
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            ledger.bind_proposal(
+                &conflict.operation_id,
+                "run",
+                "proposal-one",
+                "revision",
+                "digest"
+            ),
+            Err(ArchitectureRoomError::InvalidTransition(_))
+        ));
+        ledger
+            .transition(
+                &conflict.operation_id,
+                ArchitectureOperationStateV1::Failed,
+                "conflict",
+                "foundry",
+            )
+            .unwrap();
+        let (independent, _) = ledger
+            .create(
+                "30617:owner:repo",
+                "independent",
+                &serde_json::json!({"proposal": "two"}),
+                ArchitectureOperationKindV1::GenerativeEdit,
+                "human",
+                1,
+                vec!["read".into(), "edit".into()],
+                true,
+            )
+            .unwrap();
+        ledger
+            .bind_proposal(
+                &independent.operation_id,
+                "run",
+                "proposal-two",
+                "revision",
+                "digest",
+            )
+            .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }
