@@ -21,7 +21,7 @@ test("MCP exposes durable host tools, workflow parity, and opaque workspaces", a
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["foundry_architect", "foundry_build", "foundry_cancel", "foundry_publish", "foundry_rearchitect", "foundry_status", "foundry_validate"]);
+    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["foundry_architect", "foundry_architecture_status", "foundry_begin_architecture_review", "foundry_build", "foundry_cancel", "foundry_publish", "foundry_rearchitect", "foundry_revise_architecture_draft", "foundry_status", "foundry_submit_architecture_review", "foundry_validate"]);
     const validated = await client.callTool({ name: "foundry_validate", arguments: { workspaceId: "project", ir: "accepted.ir.json" } });
     assert.equal(validated.isError, undefined);
     assert.equal((validated.structuredContent as any).accepted, true);

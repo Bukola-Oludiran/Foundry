@@ -15,6 +15,67 @@ pub struct DiffPolicy {
     pub max_file_bytes: u64,
 }
 
+/// Writes the approved architecture contract only inside Foundry's isolated worktree.
+pub fn materialize_architecture_files(
+    worktree: &RunWorktree,
+    ir: &foundry_ir::Ir,
+    rationale: &serde_json::Value,
+    layout: &serde_json::Value,
+    locks: &serde_json::Value,
+) -> Result<Vec<String>, String> {
+    let foundry_dir = worktree.path.join(".foundry");
+    let architecture_dir = foundry_dir.join("architecture");
+    for candidate in [&foundry_dir, &architecture_dir] {
+        if candidate
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(format!(
+                "refusing architecture materialization through symlink `{}`",
+                candidate.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(&architecture_dir).map_err(|error| error.to_string())?;
+    let root = worktree
+        .path
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let target = architecture_dir
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !target.starts_with(&root) {
+        return Err("architecture materialization escaped the isolated worktree".into());
+    }
+
+    fn atomic_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        use std::io::Write;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+    }
+
+    atomic_json(&architecture_dir.join("ir.json"), ir)?;
+    atomic_json(
+        &architecture_dir.join("rationale.json"),
+        &serde_json::json!({ "rationale": rationale, "boundary_locks": locks }),
+    )?;
+    atomic_json(&architecture_dir.join("layout.json"), layout)?;
+    Ok(vec![
+        ".foundry/architecture/ir.json".into(),
+        ".foundry/architecture/rationale.json".into(),
+        ".foundry/architecture/layout.json".into(),
+    ])
+}
+
 pub trait RepositoryProvider {
     fn prepare_worktree(
         &self,

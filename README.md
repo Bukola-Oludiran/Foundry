@@ -18,6 +18,11 @@ oracle (Piston). When a node cannot satisfy its contract, its **manager re-archi
 
 > pi = substrate for one agent's turn; GraphReact = substrate for the org.
 
+Foundry's value is the organization around the models: contract-driven decomposition, independent
+verification, scoped work, durable recovery, controlled repair, reproducible evidence, and
+human-reviewed delivery. See [Why Foundry](docs/why-foundry.md) for the product rationale and the
+boundary between a coding agent and a recoverable software-building organization.
+
 ## Org concept → GraphReact primitive (v1)
 
 | Org concept | GraphReact primitive |
@@ -105,6 +110,13 @@ only a configured workspace ID and relative paths. The server never exposes the 
 an MCP resource, and build/status/cancellation/publication all use the existing GraphReact local
 durability directory.
 
+The architect-critic extension adds `foundry_begin_architecture_review`,
+`foundry_revise_architecture_draft`, `foundry_submit_architecture_review`, and
+`foundry_architecture_status`. Candidate revisions and reviews are immutable GraphReact artifacts;
+revision updates use compare-and-swap, retries use operation keys, and the author context cannot
+approve its own draft. Status returns the verified candidate IR so the critic reviews the artifact
+bound to that revision instead of a mutable working-tree copy.
+
 The repo-local Codex plugin is in `plugins/foundry`. Its skills read their canonical workflow from
 the MCP server so tool and prompt guidance remain aligned. `FOUNDRY_HOST_BIN` may override the
 default `gr-host/target/debug/foundry-host` binary path. Provider and publishing credentials remain
@@ -115,7 +127,7 @@ Claude Code discovers the checked-in project-scoped `.mcp.json`. Build the host 
 workspace overrides, verification, and troubleshooting are documented in
 [`docs/claude-code.md`](docs/claude-code.md).
 
-MCP uses the host's versioned JSON-lines sidecar by default. The sidecar accepts only the seven
+MCP uses the host's versioned JSON-lines sidecar by default. The sidecar accepts only the eleven
 declared operations, returns structured run/status/publication fields, and restarts on the next
 request after an unexpected exit. MCP request aborts are correlated to the active sidecar command
 and terminate that command; they do not replace the durable `foundry_cancel` operation for stopping

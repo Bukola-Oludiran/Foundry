@@ -33,8 +33,12 @@ or pass them as Foundry tool arguments.
 ## Verify in a session
 
 Open `/mcp`, confirm `foundry` is connected, then ask Claude to list the Foundry tools or read
-`foundry://workflows/run-durable-build`. A normal connection exposes seven tools. Use
+`foundry://workflows/run-durable-build`. A normal connection exposes eleven tools. Use
 `foundry_validate` for a read-only end-to-end check against `ir/examples/string-utils.ir.json`.
+
+Claude Code defaults to collaboration context `claude-code`; the Codex plugin defaults to `codex`.
+That makes them independent architect/critic participants. Override `FOUNDRY_MCP_CONTEXT_ID` with a
+stable, distinct value when running multiple independent sessions of the same client family.
 
 The launcher uses silent npm output because stdout is reserved exclusively for MCP frames. Server
 diagnostics go to stderr. An aborted Claude tool request cancels its correlated host process tree;

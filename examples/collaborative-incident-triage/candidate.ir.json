@@ -1,0 +1,278 @@
+{
+  "ir_version": 1,
+  "spec": {
+    "name": "incident-triage-core",
+    "description": "A deterministic TypeScript incident normalization, scoring, and triage library used to exercise durable architect-critic collaboration.",
+    "language": "typescript"
+  },
+  "root": "incident-triage",
+  "nodes": [
+    {
+      "id": "incident-triage",
+      "kind": "integrator",
+      "owner": null,
+      "provides": {
+        "name": "IncidentTriage",
+        "operations": [
+          {
+            "name": "triageIncident",
+            "signature": "triageIncident(input: IncidentInput) -> TriageResult",
+            "description": "Normalize an incident, calculate its bounded risk, and return a severity and stable summary.",
+            "properties": [
+              "deterministic and side-effect free",
+              "score is an integer in 0..10",
+              "severity is derived only from the documented score boundaries"
+            ]
+          }
+        ],
+        "types": [
+          {
+            "name": "IncidentInput",
+            "definition": "{ title: unknown; customerImpact: unknown; serviceDown: unknown; securitySignal: unknown }"
+          },
+          {
+            "name": "TriageResult",
+            "definition": "{ severity: 'low'|'medium'|'high'|'critical'; score: number; summary: string }"
+          }
+        ]
+      },
+      "requires": [
+        {
+          "node": "normalize-incident",
+          "interface": "IncidentNormalizer",
+          "operations": ["normalizeIncident"]
+        },
+        {
+          "node": "risk-score",
+          "interface": "RiskScorer",
+          "operations": ["riskScore"]
+        }
+      ],
+      "implementation": {
+        "children": ["normalize-incident", "risk-score"],
+        "write_target": "src/triage.ts",
+        "composition": "Normalize once, call riskScore(normalized.customerImpact, normalized.serviceDown, normalized.securitySignal), map 0-2 low / 3-5 medium / 6-8 high / 9-10 critical, then format `SEVERITY: title (risk score/10)`. The score formula can produce only {0,2,4,5,6,7,8,9,10}; the coarse severity ranges intentionally include unreachable scores 1 and 3."
+      },
+      "acceptance": {
+        "mandate_owner": "spec",
+        "language": "typescript",
+        "cases": [
+          {
+            "name": "zero-boundary",
+            "call": "triageIncident({ title: 'Informational', customerImpact: 0, serviceDown: false, securitySignal: false })",
+            "expect": {
+              "severity": "low",
+              "score": 0,
+              "summary": "LOW: Informational (risk 0/10)"
+            }
+          },
+          {
+            "name": "low-boundary",
+            "call": "triageIncident({ title: 'Cache warning', customerImpact: 1, serviceDown: false, securitySignal: false })",
+            "expect": {
+              "severity": "low",
+              "score": 2,
+              "summary": "LOW: Cache warning (risk 2/10)"
+            }
+          },
+          {
+            "name": "medium-boundary",
+            "call": "triageIncident({ title: 'Slow API', customerImpact: 2, serviceDown: false, securitySignal: false })",
+            "expect": {
+              "severity": "medium",
+              "score": 4,
+              "summary": "MEDIUM: Slow API (risk 4/10)"
+            }
+          },
+          {
+            "name": "medium-upper-boundary",
+            "call": "triageIncident({ title: 'Security signal', customerImpact: 0, serviceDown: false, securitySignal: true })",
+            "expect": {
+              "severity": "medium",
+              "score": 5,
+              "summary": "MEDIUM: Security signal (risk 5/10)"
+            }
+          },
+          {
+            "name": "high-boundary",
+            "call": "triageIncident({ title: 'Checkout down', customerImpact: 1, serviceDown: true, securitySignal: false })",
+            "expect": {
+              "severity": "high",
+              "score": 6,
+              "summary": "HIGH: Checkout down (risk 6/10)"
+            }
+          },
+          {
+            "name": "high-upper-boundary",
+            "call": "triageIncident({ title: 'Broad degradation', customerImpact: 4, serviceDown: false, securitySignal: false })",
+            "expect": {
+              "severity": "high",
+              "score": 8,
+              "summary": "HIGH: Broad degradation (risk 8/10)"
+            }
+          },
+          {
+            "name": "critical-cap",
+            "call": "triageIncident({ title: '  Breach and outage  ', customerImpact: 9, serviceDown: true, securitySignal: true })",
+            "expect": {
+              "severity": "critical",
+              "score": 10,
+              "summary": "CRITICAL: Breach and outage (risk 10/10)"
+            }
+          },
+          {
+            "name": "critical-nine-security-only",
+            "call": "triageIncident({ title: 'Credential exposure', customerImpact: 2, serviceDown: false, securitySignal: true })",
+            "expect": {
+              "severity": "critical",
+              "score": 9,
+              "summary": "CRITICAL: Credential exposure (risk 9/10)"
+            }
+          }
+        ],
+        "properties": [
+          "result.score is always an integer between 0 and 10",
+          "the summary contains the normalized title and exact score",
+          "the score formula has reachable set {0,2,4,5,6,7,8,9,10}; scores 1 and 3 are intentionally unreachable even though the severity ranges remain contiguous"
+        ]
+      }
+    },
+    {
+      "id": "normalize-incident",
+      "kind": "leaf",
+      "owner": "incident-triage",
+      "provides": {
+        "name": "IncidentNormalizer",
+        "operations": [
+          {
+            "name": "normalizeIncident",
+            "signature": "normalizeIncident(input: IncidentInput) -> NormalizedIncident",
+            "description": "Normalize title, impact, and boolean flags into a stable value.",
+            "properties": [
+              "customerImpact is truncated toward zero then clamped to 0..5",
+              "blank titles become Untitled incident",
+              "serviceDown and securitySignal are true only when the input is exactly true; every other value becomes false",
+              "deterministic and side-effect free"
+            ]
+          }
+        ],
+        "types": [
+          {
+            "name": "IncidentInput",
+            "definition": "{ title: unknown; customerImpact: unknown; serviceDown: unknown; securitySignal: unknown }"
+          },
+          {
+            "name": "NormalizedIncident",
+            "definition": "{ title: string; customerImpact: number; serviceDown: boolean; securitySignal: boolean }"
+          }
+        ]
+      },
+      "implementation": {
+        "language": "typescript",
+        "write_target": "src/normalize.ts"
+      },
+      "acceptance": {
+        "mandate_owner": "incident-triage",
+        "language": "typescript",
+        "cases": [
+          {
+            "name": "trims-and-clamps-high",
+            "call": "normalizeIncident({ title: '  Outage  ', customerImpact: 9.8, serviceDown: true, securitySignal: false })",
+            "expect": {
+              "title": "Outage",
+              "customerImpact": 5,
+              "serviceDown": true,
+              "securitySignal": false
+            }
+          },
+          {
+            "name": "defaults-and-clamps-low",
+            "call": "normalizeIncident({ title: '   ', customerImpact: -3, serviceDown: 1, securitySignal: null })",
+            "expect": {
+              "title": "Untitled incident",
+              "customerImpact": 0,
+              "serviceDown": false,
+              "securitySignal": false
+            }
+          },
+          {
+            "name": "truncates-fractional-impact",
+            "call": "normalizeIncident({ title: 'Partial impact', customerImpact: 2.7, serviceDown: false, securitySignal: false })",
+            "expect": {
+              "title": "Partial impact",
+              "customerImpact": 2,
+              "serviceDown": false,
+              "securitySignal": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "risk-score",
+      "kind": "leaf",
+      "owner": "incident-triage",
+      "provides": {
+        "name": "RiskScorer",
+        "operations": [
+          {
+            "name": "riskScore",
+            "signature": "riskScore(customerImpact: number, serviceDown: boolean, securitySignal: boolean) -> number",
+            "description": "Calculate the documented additive risk score and cap it at 10.",
+            "properties": [
+              "returns an integer in 0..10",
+              "customerImpact contributes two points per level",
+              "outage contributes four and security contributes five",
+              "deterministic and side-effect free"
+            ]
+          }
+        ]
+      },
+      "implementation": {
+        "language": "typescript",
+        "write_target": "src/risk-score.ts"
+      },
+      "acceptance": {
+        "mandate_owner": "incident-triage",
+        "language": "typescript",
+        "cases": [
+          {
+            "name": "zero-boundary",
+            "call": "riskScore(0, false, false)",
+            "expect": 0
+          },
+          {
+            "name": "impact-only",
+            "call": "riskScore(2, false, false)",
+            "expect": 4
+          },
+          {
+            "name": "outage-boundary",
+            "call": "riskScore(1, true, false)",
+            "expect": 6
+          },
+          {
+            "name": "medium-upper-boundary",
+            "call": "riskScore(0, false, true)",
+            "expect": 5
+          },
+          {
+            "name": "high-upper-boundary",
+            "call": "riskScore(4, false, false)",
+            "expect": 8
+          },
+          {
+            "name": "combined-capped",
+            "call": "riskScore(5, true, true)",
+            "expect": 10
+          },
+          {
+            "name": "security-only-critical-boundary",
+            "call": "riskScore(2, false, true)",
+            "expect": 9
+          }
+        ]
+      }
+    }
+  ]
+}

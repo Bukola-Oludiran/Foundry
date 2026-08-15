@@ -26,6 +26,14 @@ const MAX_CONCURRENT_COMMANDS: usize = 16;
 enum HostOperation {
     Validate,
     Architect,
+    #[serde(rename = "architecture-begin")]
+    ArchitectureBegin,
+    #[serde(rename = "architecture-revise")]
+    ArchitectureRevise,
+    #[serde(rename = "architecture-review")]
+    ArchitectureReview,
+    #[serde(rename = "architecture-status")]
+    ArchitectureStatus,
     Build,
     Status,
     Cancel,
@@ -38,6 +46,10 @@ impl HostOperation {
         match self {
             Self::Validate => "validate",
             Self::Architect => "architect",
+            Self::ArchitectureBegin => "architecture-begin",
+            Self::ArchitectureRevise => "architecture-revise",
+            Self::ArchitectureReview => "architecture-review",
+            Self::ArchitectureStatus => "architecture-status",
             Self::Build => "build",
             Self::Status => "status",
             Self::Cancel => "cancel",
@@ -149,6 +161,13 @@ fn normalized_state(operation: HostOperation, stdout: &str) -> Value {
         {
             state.insert("draftPullRequestUrl".into(), json!(url));
         }
+    }
+    if let Some(collaboration) = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("collaboration: "))
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+    {
+        state.insert("collaboration".into(), collaboration);
     }
     Value::Object(state)
 }

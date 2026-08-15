@@ -19,6 +19,19 @@ export const FOUNDRY_WORKFLOWS = [
 Do not publish or modify a protected base branch as part of architecture.`,
   },
   {
+    id: "collaborative-architecture-review",
+    description: "Run a durable architect-critic loop across independent MCP contexts.",
+    body: `# Collaborative architecture review
+
+1. The author creates or updates a compiler-valid IR in a configured workspace.
+2. Open the durable draft with foundry_begin_architecture_review and retain its run ID and revision.
+3. A different MCP context reads the exact immutable candidate returned by foundry_architecture_status, then records its verdict with foundry_submit_architecture_review.
+4. If changes are requested, the original author updates the IR and uses foundry_revise_architecture_draft with the expected revision.
+5. Repeat independent review until approval, then confirm the terminal state with foundry_architecture_status.
+
+Operation keys must be stable across retries. Self-review is rejected, candidate and review bodies are immutable artifacts, and an approved collaboration cannot be revised.`,
+  },
+  {
     id: "run-durable-build",
     description: "Start or resume a crash-recoverable GraphReact build.",
     body: `# Run a durable build
@@ -69,4 +82,4 @@ export function renderFoundryWorkflow(workflow: FoundryWorkflow, resourceUri?: s
   return `${workflow.body}\n\nUse Foundry MCP tools for every control-plane mutation.${resourceUri ? `\nPrimary resource: ${resourceUri}` : ""}`;
 }
 
-export const FOUNDRY_SERVER_INSTRUCTIONS = `Foundry exposes the existing durable GraphReact control plane through workspace-scoped MCP tools. Use configured workspace IDs and relative paths only. Read foundry://workflows/architect-from-spec before architecture, foundry://workflows/run-durable-build before builds, foundry://workflows/propose-subtree-rearchitecture before structural repair, and foundry://workflows/publish-draft-review before publication. Never edit durability logs or artifacts directly. Publication is draft-only and always requires human review and merge.`;
+export const FOUNDRY_SERVER_INSTRUCTIONS = `Foundry exposes the existing durable GraphReact control plane through workspace-scoped MCP tools. Use configured workspace IDs and relative paths only. Read foundry://workflows/architect-from-spec before architecture, foundry://workflows/collaborative-architecture-review for independent architect-critic work, foundry://workflows/run-durable-build before builds, foundry://workflows/propose-subtree-rearchitecture before structural repair, and foundry://workflows/publish-draft-review before publication. Never edit durability logs or artifacts directly. Publication is draft-only and always requires human review and merge.`;

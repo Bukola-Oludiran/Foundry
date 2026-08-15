@@ -23,6 +23,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:mcp
       - run: npm run test:sidecar
+      - run: npm run test:collaboration
       - run: npm audit --audit-level=high
 
   rust:

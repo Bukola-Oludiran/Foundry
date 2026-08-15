@@ -403,6 +403,35 @@ pub fn review_evidence(durability_dir: &Path, run_id: &str) -> Result<String, St
     Ok(summary)
 }
 
+pub fn run_artifacts(
+    durability_dir: &Path,
+    run_id: &str,
+) -> Result<Vec<graphreact_persistence::ArtifactMetadata>, String> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+    let engine = open_existing(durability_dir)?;
+    block_on(list_run_artifacts(&engine, &run_id)).map_err(|error| error.to_string())
+}
+
+pub fn read_run_artifact(
+    durability_dir: &Path,
+    run_id: &str,
+    artifact_id: &str,
+) -> Result<(graphreact_persistence::ArtifactMetadata, Vec<u8>), String> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+    let artifact_id = graphreact_persistence::ArtifactId::parse(artifact_id.to_owned())
+        .map_err(|error| error.to_string())?;
+    let engine = open_existing(durability_dir)?;
+    let metadata = block_on(list_run_artifacts(&engine, &run_id))
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|metadata| metadata.id == artifact_id)
+        .ok_or_else(|| "artifact does not belong to this run".to_string())?;
+    let bytes = block_on(engine.read_artifact(&artifact_id))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "artifact bytes are missing".to_string())?;
+    Ok((metadata, bytes))
+}
+
 fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -444,6 +473,7 @@ async fn load_or_create_run(
     engine: &dyn PersistenceEngine,
     idempotency_key: &str,
     request_hash: [u8; 32],
+    preferred_run_id: Option<&RunId>,
 ) -> Result<RunContext, String> {
     let records = engine.replay(0).await.map_err(|error| error.to_string())?;
     let mut found: Option<RunContext> = None;
@@ -494,7 +524,7 @@ async fn load_or_create_run(
         return Ok(found);
     }
 
-    let run_id = RunId::new();
+    let run_id = preferred_run_id.cloned().unwrap_or_else(RunId::new);
     let attempt_id = AttemptId::new();
     let now = unix_time_ms();
     engine
@@ -546,6 +576,7 @@ pub fn run(
     durability_dir: PathBuf,
     idempotency_key: &str,
     targets: &BTreeMap<String, ()>,
+    preferred_run_id: Option<&str>,
 ) -> Result<(), String> {
     debug_assert_eq!(MANAGER_DECISIONS.len(), 4);
     let mut definitions: HashMap<String, NodeDefinition> = jobs
@@ -636,10 +667,14 @@ pub fn run(
         "base": idempotency_key,
     })))
     .into();
+    let preferred_run_id = preferred_run_id
+        .map(|value| RunId::parse(value.to_owned()).map_err(|error| error.to_string()))
+        .transpose()?;
     let run = block_on(load_or_create_run(
         engine.as_ref(),
         idempotency_key,
         request_hash,
+        preferred_run_id.as_ref(),
     ))?;
     println!("  durable run: {} ({:?})", run.run_id, run.status);
     if run.status.is_terminal() {

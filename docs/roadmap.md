@@ -107,8 +107,33 @@ Status: first durable-host façade implemented; richer project authoring remains
   cancellation, which remains an explicit, monotonic GraphReact operation.
 - Implemented: checked-in Claude Code project discovery with a credential-free `.mcp.json`, a
   protocol-clean launcher, configuration tests, and a native Claude Code connection health check.
+- Implemented: the first durable collaborative architecture mode (`architect-critic`), including
+  immutable candidate/review artifacts, independent MCP context enforcement, revision CAS,
+  replay-safe operation keys, changes-requested repair, and approval immutability.
 - Remaining: richer architecture project resources and the separately versioned recursive product
   IR.
+
+## Architecture Studio and Buzz embedding
+
+Status: editable preview implementation.
+
+- Implemented: versioned bindings, revisions, proposal branches, presentation-only layouts,
+  boundary locks, deterministic commands, full-IR compilation, semantic CAS, idempotent mutation,
+  generated subtree repair, independent exact-digest critique, signed human approval, promotion,
+  durable build handoff, canonical worktree materialization, and recovery of proposal heads.
+- Implemented: single-community HTTP service, NIP-98 session exchange and replay rejection,
+  memory-only scoped capabilities, relay-verified kind `46011` approvals, lifecycle kinds
+  `43001–43006`, artifact projections, run status/cancellation/artifacts/SSE, and stable error codes.
+- Implemented in Buzz: preview-gated Architecture project tab, deep links, C4/UML projections,
+  ELK layout, typed semantic edits, proposal review, locks, approval/build gates, offline verified
+  projections, and a credential-isolating Tauri bridge.
+- Implemented inception: an empty repository Studio accepts a product specification, runs the
+  bounded architecture agent, compiles the complete IR, persists the initial proposal, and obtains
+  an independent critic verdict before returning the first editable projection.
+- Implemented delivery: terminal green builds invoke the idempotent draft-only publisher, attach
+  proposal/review/approval/diff evidence, and durably advance the revision to `delivered` only after
+  publication succeeds.
+- Remaining before public release: exhaustive desktop Playwright/crash-matrix acceptance.
 
 ## Deferred
 

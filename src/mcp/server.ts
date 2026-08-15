@@ -6,12 +6,17 @@ import { FOUNDRY_SERVER_INSTRUCTIONS, FOUNDRY_WORKFLOWS, findFoundryWorkflow, re
 
 const object = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 const text = { type: "string", minLength: 1, maxLength: 4096 };
+const operationKey = { type: "string", minLength: 1, maxLength: 200 };
 const relativePath = { type: "string", minLength: 1, maxLength: 1024, description: "Path relative to the configured workspace root." };
 const common = { workspaceId: { type: "string", minLength: 1, maxLength: 100 } };
 
 const TOOLS = [
   { name: "foundry_validate", description: "Validate and compile an IR without changing repository state.", schema: object({ ...common, ir: relativePath }, ["workspaceId", "ir"]), annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false } },
   { name: "foundry_architect", description: "Generate a validated IR and rationale through the configured architecture worker.", schema: object({ ...common, spec: relativePath, output: relativePath, base: text, languages: { type: "array", minItems: 1, maxItems: 3, uniqueItems: true, items: { enum: ["python", "typescript", "go"] } } }, ["workspaceId", "spec", "output"]) },
+  { name: "foundry_begin_architecture_review", description: "Open a durable architect-critic draft for a compiler-valid IR authored by this MCP context.", schema: object({ ...common, ir: relativePath, durabilityDir: relativePath, idempotencyKey: operationKey }, ["workspaceId", "ir", "durabilityDir", "idempotencyKey"]) },
+  { name: "foundry_revise_architecture_draft", description: "Submit the author's next compiler-valid revision after an independent critic requests changes.", schema: object({ ...common, runId: text, ir: relativePath, durabilityDir: relativePath, expectedRevision: { type: "integer", minimum: 1 }, operationKey }, ["workspaceId", "runId", "ir", "durabilityDir", "expectedRevision", "operationKey"]) },
+  { name: "foundry_submit_architecture_review", description: "Submit an approve or changes-requested verdict from an MCP context independent of the draft author.", schema: object({ ...common, runId: text, durabilityDir: relativePath, expectedRevision: { type: "integer", minimum: 1 }, verdict: { enum: ["approve", "changes_requested"] }, body: { type: "string", minLength: 1, maxLength: 50000 }, operationKey }, ["workspaceId", "runId", "durabilityDir", "expectedRevision", "verdict", "body", "operationKey"]) },
+  { name: "foundry_architecture_status", description: "Read the durable architect-critic phase, revision, exact candidate IR, digest, and latest review evidence.", schema: object({ ...common, runId: text, durabilityDir: relativePath }, ["workspaceId", "runId", "durabilityDir"]), annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false } },
   { name: "foundry_build", description: "Start or resume a GraphReact durable build using local persistence.", schema: object({ ...common, ir: relativePath, durabilityDir: relativePath, base: text, dryRun: { type: "boolean" } }, ["workspaceId", "ir", "durabilityDir"]) },
   { name: "foundry_status", description: "Read the terminal or active status of a durable run.", schema: object({ ...common, runId: text, durabilityDir: relativePath }, ["workspaceId", "runId", "durabilityDir"]), annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false } },
   { name: "foundry_cancel", description: "Durably request monotonic cancellation for a run.", schema: object({ ...common, runId: text, durabilityDir: relativePath }, ["workspaceId", "runId", "durabilityDir"]), annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false } },
@@ -43,6 +48,12 @@ function optionalString(input: Record<string, unknown>, name: string, maximum = 
   return input[name] === undefined ? undefined : stringArgument(input, name, maximum);
 }
 
+function positiveInteger(input: Record<string, unknown>, name: string): number {
+  const value = input[name];
+  if (!Number.isInteger(value) || Number(value) < 1) throw new HostCommandError("INVALID_ARGUMENT", `${name} must be a positive integer`);
+  return Number(value);
+}
+
 function workspace(input: Record<string, unknown>): string {
   return stringArgument(input, "workspaceId", 100);
 }
@@ -66,6 +77,28 @@ export function createFoundryMcpServer(client: FoundryHostClient): Server {
           const languages = input.languages;
           if (languages !== undefined && (!Array.isArray(languages) || languages.length === 0 || languages.length > 3 || new Set(languages).size !== languages.length || languages.some((language) => !["python", "typescript", "go"].includes(String(language))))) throw new HostCommandError("INVALID_ARGUMENT", "languages must contain unique supported language names");
           result = await client.architect({ workspaceId: workspace(input), spec: stringArgument(input, "spec", 1024), output: stringArgument(input, "output", 1024), base: optionalString(input, "base"), languages: languages?.map(String) }, context.mcpReq.signal);
+          break;
+        }
+        case "foundry_begin_architecture_review": {
+          rejectUnknown(input, ["workspaceId", "ir", "durabilityDir", "idempotencyKey"]);
+          result = await client.beginArchitectureReview({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024), durabilityDir: stringArgument(input, "durabilityDir", 1024), idempotencyKey: stringArgument(input, "idempotencyKey", 200) }, context.mcpReq.signal);
+          break;
+        }
+        case "foundry_revise_architecture_draft": {
+          rejectUnknown(input, ["workspaceId", "runId", "ir", "durabilityDir", "expectedRevision", "operationKey"]);
+          result = await client.reviseArchitectureDraft({ workspaceId: workspace(input), runId: stringArgument(input, "runId", 200), ir: stringArgument(input, "ir", 1024), durabilityDir: stringArgument(input, "durabilityDir", 1024), expectedRevision: positiveInteger(input, "expectedRevision"), operationKey: stringArgument(input, "operationKey", 200) }, context.mcpReq.signal);
+          break;
+        }
+        case "foundry_submit_architecture_review": {
+          rejectUnknown(input, ["workspaceId", "runId", "durabilityDir", "expectedRevision", "verdict", "body", "operationKey"]);
+          const verdict = stringArgument(input, "verdict", 32);
+          if (verdict !== "approve" && verdict !== "changes_requested") throw new HostCommandError("INVALID_ARGUMENT", "verdict must be approve or changes_requested");
+          result = await client.submitArchitectureReview({ workspaceId: workspace(input), runId: stringArgument(input, "runId", 200), durabilityDir: stringArgument(input, "durabilityDir", 1024), expectedRevision: positiveInteger(input, "expectedRevision"), verdict, body: stringArgument(input, "body", 50000), operationKey: stringArgument(input, "operationKey", 200) }, context.mcpReq.signal);
+          break;
+        }
+        case "foundry_architecture_status": {
+          rejectUnknown(input, ["workspaceId", "runId", "durabilityDir"]);
+          result = await client.architectureStatus({ workspaceId: workspace(input), runId: stringArgument(input, "runId", 200), durabilityDir: stringArgument(input, "durabilityDir", 1024) }, context.mcpReq.signal);
           break;
         }
         case "foundry_build": {

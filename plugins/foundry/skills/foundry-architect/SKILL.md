@@ -5,6 +5,7 @@ description: Create or validate a Foundry architecture from a product specificat
 
 # Foundry Architect
 
-Read `foundry://workflows/architect-from-spec` before acting.
+Read `foundry://workflows/architect-from-spec` before acting. For multi-agent author/critic work,
+also read `foundry://workflows/collaborative-architecture-review`.
 
 Use configured workspace IDs and relative paths. Generate the IR through `foundry_architect`, inspect its rationale, then run `foundry_validate`. Treat schema and Rust compiler diagnostics as authoritative. Do not publish or modify a protected base branch.

@@ -56,7 +56,7 @@ interface SidecarResponse {
   error?: { code: string; message: string };
 }
 
-const SIDECAR_OPERATIONS = new Set(["validate", "architect", "build", "status", "cancel", "rearchitect", "publish"]);
+const SIDECAR_OPERATIONS = new Set(["validate", "architect", "architecture-begin", "architecture-revise", "architecture-review", "architecture-status", "build", "status", "cancel", "rearchitect", "publish"]);
 
 export class RustSidecarRunner implements CommandRunner {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -143,7 +143,7 @@ export class RustSidecarRunner implements CommandRunner {
 type CommonPath = { workspaceId: string };
 
 export class FoundryHostClient {
-  constructor(readonly workspaces: WorkspaceRegistry, private readonly runner: CommandRunner) {}
+  constructor(readonly workspaces: WorkspaceRegistry, private readonly runner: CommandRunner, private readonly contextId = process.env.FOUNDRY_MCP_CONTEXT_ID ?? randomUUID()) {}
 
   static configured(workspaces: WorkspaceRegistry): FoundryHostClient {
     const binary = resolve(process.env.FOUNDRY_HOST_BIN ?? "gr-host/target/debug/foundry-host");
@@ -168,9 +168,14 @@ export class FoundryHostClient {
     if (execution.code !== 0) throw new HostCommandError("HOST_COMMAND_FAILED", execution.stderr || execution.stdout || `Foundry exited with ${execution.code}`, { exitCode: execution.code });
     const runId = execution.stdout.match(/durable run:\s*([^\s]+)/)?.[1];
     const status = execution.stdout.match(/^([^:\n]+):\s*([A-Za-z_]+)$/m);
+    const collaborationLine = execution.stdout.split("\n").find((line) => line.startsWith("collaboration: "));
+    let collaboration: Record<string, unknown> | undefined;
+    if (collaborationLine) {
+      try { collaboration = JSON.parse(collaborationLine.slice("collaboration: ".length)) as Record<string, unknown>; } catch { throw new HostCommandError("HOST_PROTOCOL_ERROR", "Foundry returned malformed collaboration state"); }
+    }
     return {
       accepted: true,
-      state: execution.state ?? { command: args[0], stdout: execution.stdout, ...(runId ? { runId } : {}), ...(status ? { runId: status[1], status: status[2].toLowerCase() } : {}) },
+      state: execution.state ?? { command: args[0], stdout: execution.stdout, ...(runId ? { runId } : {}), ...(status ? { runId: status[1], status: status[2].toLowerCase() } : {}), ...(collaboration ? { collaboration } : {}) },
       diagnostics: [],
       provenance: { operationId, at: new Date().toISOString() },
     };
@@ -186,6 +191,26 @@ export class FoundryHostClient {
     const args = ["architect", "--spec", this.workspaces.resolve(input.workspaceId, input.spec), "--output", this.workspaces.resolve(input.workspaceId, input.output, { output: true }), "--repo", root, "--base", input.base ?? "HEAD"];
     if (input.languages?.length) args.push("--languages", input.languages.join(","));
     return this.execute(args, root, signal);
+  }
+
+  beginArchitectureReview(input: CommonPath & { ir: string; durabilityDir: string; idempotencyKey: string }, signal?: AbortSignal): Promise<FoundryResult> {
+    const root = this.workspaces.root(input.workspaceId);
+    return this.execute(["architecture-begin", "--ir", this.workspaces.resolve(input.workspaceId, input.ir), "--durability-dir", this.workspaces.resolve(input.workspaceId, input.durabilityDir, { output: true }), "--context-id", this.contextId, "--idempotency-key", input.idempotencyKey], root, signal);
+  }
+
+  reviseArchitectureDraft(input: CommonPath & { runId: string; ir: string; durabilityDir: string; expectedRevision: number; operationKey: string }, signal?: AbortSignal): Promise<FoundryResult> {
+    const root = this.workspaces.root(input.workspaceId);
+    return this.execute(["architecture-revise", "--run", input.runId, "--ir", this.workspaces.resolve(input.workspaceId, input.ir), "--durability-dir", this.workspaces.resolve(input.workspaceId, input.durabilityDir), "--context-id", this.contextId, "--expected-revision", String(input.expectedRevision), "--operation-key", input.operationKey], root, signal);
+  }
+
+  submitArchitectureReview(input: CommonPath & { runId: string; durabilityDir: string; expectedRevision: number; verdict: "approve" | "changes_requested"; body: string; operationKey: string }, signal?: AbortSignal): Promise<FoundryResult> {
+    const root = this.workspaces.root(input.workspaceId);
+    return this.execute(["architecture-review", "--run", input.runId, "--durability-dir", this.workspaces.resolve(input.workspaceId, input.durabilityDir), "--context-id", this.contextId, "--expected-revision", String(input.expectedRevision), "--verdict", input.verdict, "--body", input.body, "--operation-key", input.operationKey], root, signal);
+  }
+
+  architectureStatus(input: CommonPath & { runId: string; durabilityDir: string }, signal?: AbortSignal): Promise<FoundryResult> {
+    const root = this.workspaces.root(input.workspaceId);
+    return this.execute(["architecture-status", "--run", input.runId, "--durability-dir", this.workspaces.resolve(input.workspaceId, input.durabilityDir)], root, signal);
   }
 
   build(input: CommonPath & { ir: string; base?: string; durabilityDir: string; dryRun?: boolean }, signal?: AbortSignal): Promise<FoundryResult> {

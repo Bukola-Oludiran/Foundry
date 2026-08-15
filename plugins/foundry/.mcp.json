@@ -2,7 +2,7 @@
   "mcpServers": {
     "foundry": {
       "command": "npm",
-      "args": ["--silent", "--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:stdio"],
+      "args": ["--silent", "--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:codex"],
       "env_vars": [
         "FOUNDRY_WORKSPACE_ROOTS",
         "FOUNDRY_HOST_BIN",

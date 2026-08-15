@@ -14,14 +14,17 @@
 //! Usage: foundry-host --ir <path> [--pi-pool URL] [--workspace DIR] [--rearchitect NODE]
 
 mod architect;
+mod collaboration;
 mod durable;
 mod http;
 mod repository;
 mod sidecar;
+mod studio;
+mod studio_service;
 use http::http_post_json;
 use repository::{
-    git_revision, DiffPolicy, GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher,
-    RepositoryProvider,
+    git_revision, materialize_architecture_files, DiffPolicy, GitHubRepositoryProvider,
+    LocalGitRepository, PullRequestPublisher, RepositoryProvider,
 };
 
 use foundry_ir::types::{Ir, Kind, Node};
@@ -270,6 +273,144 @@ fn main() {
             eprintln!("sidecar failed: {error}");
             std::process::exit(1);
         });
+        return;
+    }
+    if args.get(1).is_some_and(|value| value == "studio-serve") {
+        studio_service::serve(&args).unwrap_or_else(|error| {
+            eprintln!("Architecture Studio service failed: {error}");
+            std::process::exit(1);
+        });
+        return;
+    }
+    if args
+        .get(1)
+        .is_some_and(|value| value == "architecture-begin")
+    {
+        let required = |flag: &str| {
+            arg(&args, flag).unwrap_or_else(|| {
+                eprintln!("usage: foundry-host architecture-begin --ir <file> --durability-dir <dir> --context-id <id> --idempotency-key <key>");
+                std::process::exit(2);
+            })
+        };
+        let ir = required("--ir");
+        let bytes = std::fs::read(&ir).unwrap_or_else(|error| {
+            eprintln!("read {ir}: {error}");
+            std::process::exit(1);
+        });
+        let state = collaboration::begin(
+            &bytes,
+            std::path::Path::new(&required("--durability-dir")),
+            &required("--context-id"),
+            &required("--idempotency-key"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("architecture collaboration failed: {error}");
+            std::process::exit(1);
+        });
+        println!(
+            "collaboration: {}",
+            serde_json::to_string(&state).expect("collaboration state serializes")
+        );
+        return;
+    }
+    if args
+        .get(1)
+        .is_some_and(|value| value == "architecture-revise")
+    {
+        let required = |flag: &str| {
+            arg(&args, flag).unwrap_or_else(|| {
+                eprintln!("usage: foundry-host architecture-revise --run <id> --ir <file> --durability-dir <dir> --context-id <id> --expected-revision <n> --operation-key <key>");
+                std::process::exit(2);
+            })
+        };
+        let ir = required("--ir");
+        let bytes = std::fs::read(&ir).unwrap_or_else(|error| {
+            eprintln!("read {ir}: {error}");
+            std::process::exit(1);
+        });
+        let expected_revision = required("--expected-revision")
+            .parse::<u32>()
+            .unwrap_or_else(|_| {
+                eprintln!("--expected-revision must be a positive integer");
+                std::process::exit(2);
+            });
+        let state = collaboration::revise(
+            &bytes,
+            std::path::Path::new(&required("--durability-dir")),
+            &required("--run"),
+            &required("--context-id"),
+            expected_revision,
+            &required("--operation-key"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("architecture revision failed: {error}");
+            std::process::exit(1);
+        });
+        println!(
+            "collaboration: {}",
+            serde_json::to_string(&state).expect("collaboration state serializes")
+        );
+        return;
+    }
+    if args
+        .get(1)
+        .is_some_and(|value| value == "architecture-review")
+    {
+        let required = |flag: &str| {
+            arg(&args, flag).unwrap_or_else(|| {
+                eprintln!("usage: foundry-host architecture-review --run <id> --durability-dir <dir> --context-id <id> --expected-revision <n> --verdict <approve|changes_requested> --body <text> --operation-key <key>");
+                std::process::exit(2);
+            })
+        };
+        let expected_revision = required("--expected-revision")
+            .parse::<u32>()
+            .unwrap_or_else(|_| {
+                eprintln!("--expected-revision must be a positive integer");
+                std::process::exit(2);
+            });
+        let state = collaboration::review(
+            std::path::Path::new(&required("--durability-dir")),
+            &required("--run"),
+            &required("--context-id"),
+            expected_revision,
+            &required("--verdict"),
+            &required("--body"),
+            &required("--operation-key"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("architecture review failed: {error}");
+            std::process::exit(1);
+        });
+        println!(
+            "collaboration: {}",
+            serde_json::to_string(&state).expect("collaboration state serializes")
+        );
+        return;
+    }
+    if args
+        .get(1)
+        .is_some_and(|value| value == "architecture-status")
+    {
+        let required = |flag: &str| {
+            arg(&args, flag).unwrap_or_else(|| {
+                eprintln!(
+                    "usage: foundry-host architecture-status --run <id> --durability-dir <dir>"
+                );
+                std::process::exit(2);
+            })
+        };
+        let state = collaboration::status(
+            std::path::Path::new(&required("--durability-dir")),
+            &required("--run"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("architecture status failed: {error}");
+            std::process::exit(1);
+        });
+        println!(
+            "collaboration: {}",
+            serde_json::to_string(&state).expect("collaboration state serializes")
+        );
         return;
     }
     if args.get(1).is_some_and(|value| value == "validate") {
@@ -639,7 +780,8 @@ fn main() {
         "{:x}",
         Sha256::digest(format!("{ir_digest}:{base_commit}:{scope_key}").as_bytes())
     );
-    let run_id = format!("run-{}", &run_digest[..16]);
+    let run_id =
+        arg(&args, "--durable-run-id").unwrap_or_else(|| format!("run-{}", &run_digest[..16]));
     let attempt_path = std::path::Path::new(&workspace_root)
         .join(".foundry")
         .join("attempts")
@@ -695,6 +837,44 @@ fn main() {
         base_commit.clone_from(&worktree.base_commit);
         println!("  branch:       {}", worktree.branch);
     }
+    let architecture_paths = if let Some(worktree) = &run_worktree {
+        match (
+            arg(&args, "--studio-rationale"),
+            arg(&args, "--studio-layout"),
+            arg(&args, "--studio-locks"),
+        ) {
+            (Some(rationale), Some(layout), Some(locks)) => {
+                let read_json = |path: &str| -> Value {
+                    serde_json::from_slice(&std::fs::read(path).unwrap_or_else(|error| {
+                        eprintln!("read Studio architecture metadata `{path}`: {error}");
+                        std::process::exit(1);
+                    }))
+                    .unwrap_or_else(|error| {
+                        eprintln!("parse Studio architecture metadata `{path}`: {error}");
+                        std::process::exit(1);
+                    })
+                };
+                materialize_architecture_files(
+                    worktree,
+                    &ir,
+                    &read_json(&rationale),
+                    &read_json(&layout),
+                    &read_json(&locks),
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("materialize approved architecture: {error}");
+                    std::process::exit(1);
+                })
+            }
+            (None, None, None) => Vec::new(),
+            _ => {
+                eprintln!("Studio builds require --studio-rationale, --studio-layout, and --studio-locks together");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let ws = attempt_path.to_string_lossy().into_owned();
     std::fs::create_dir_all(format!("{ws}/src")).ok();
 
@@ -730,6 +910,7 @@ fn main() {
             durability_dir,
             &run_digest,
             &targets,
+            arg(&args, "--durable-run-id").as_deref(),
         )
         .unwrap_or_else(|error| {
             eprintln!("durable build failed: {error}");
@@ -740,6 +921,7 @@ fn main() {
                 allowed_paths: targets
                     .keys()
                     .filter_map(|node| plan.write_targets.get(node).cloned())
+                    .chain(architecture_paths.iter().cloned())
                     .collect::<BTreeSet<_>>(),
                 max_file_bytes: 4 * 1024 * 1024,
             };

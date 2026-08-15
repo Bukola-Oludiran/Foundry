@@ -1,0 +1,256 @@
+{
+  "ir_version": 1,
+  "spec": {
+    "name": "aegis-supply-chain",
+    "description": "A local-first software supply-chain assessment, bounded remediation, evidence, and draft-only delivery control plane.",
+    "language": "typescript"
+  },
+  "root": "aegis",
+  "nodes": [
+    {
+      "id": "aegis",
+      "kind": "integrator",
+      "owner": null,
+      "provides": {
+        "name": "AegisControlPlane",
+        "operations": [
+          {
+            "name": "assessRepository",
+            "signature": "assessRepository(request: AssessmentRequest) -> AssessmentResult",
+            "description": "Evaluate one immutable repository revision and return evidence plus a draft-only publication decision.",
+            "properties": ["deterministic for identical explicit inputs", "never mutates the protected base", "publication is draft-only"]
+          },
+          {
+            "name": "cancelAssessment",
+            "signature": "cancelAssessment(runId: string) -> CancellationResult",
+            "properties": ["monotonic", "retains committed evidence", "idempotent"]
+          }
+        ],
+        "types": [
+          {"name": "AssessmentRequest", "definition": "{ runId: string; baseCommit: string; repository: RepositoryFixture; policy: unknown; evaluationTime: string; idempotencyKey: string }"},
+          {"name": "AssessmentResult", "definition": "{ runId: string; status: 'green'|'red'|'cancelled'; findings: Finding[]; evidenceDigest: string; publication: DraftPublication|null }"},
+          {"name": "CancellationResult", "definition": "{ runId: string; cancelled: boolean; evidenceRetained: boolean }"},
+          {"name": "RepositoryFixture", "definition": "{ files: { path: string; sha256: string; content: string }[]; provenance: unknown[]; vulnerabilities: unknown[] }"},
+          {"name": "Finding", "definition": "{ id: string; severity: 'low'|'medium'|'high'|'critical'; waived: boolean; remediable: boolean }"},
+          {"name": "DraftPublication", "definition": "{ draft: true; baseCommit: string; title: string; body: string; idempotencyKey: string }"}
+        ]
+      },
+      "requires": [
+        {"node": "inventory-domain", "interface": "InventoryDomain"},
+        {"node": "policy-domain", "interface": "PolicyDomain"},
+        {"node": "remediation-domain", "interface": "RemediationDomain"},
+        {"node": "evidence-domain", "interface": "EvidenceDomain"},
+        {"node": "operator-domain", "interface": "OperatorDomain"}
+      ],
+      "implementation": {
+        "children": ["inventory-domain", "policy-domain", "remediation-domain", "evidence-domain", "operator-domain"],
+        "write_target": "src/control-plane/aegis.ts",
+        "composition": "Bind the immutable base, inventory components and provenance, evaluate policy, plan and verify permitted remediation, build evidence, then ask the operator domain for a draft-only decision. Cancellation closes admission without deleting evidence."
+      },
+      "acceptance": {
+        "mandate_owner": "spec",
+        "language": "typescript",
+        "cases": [
+          {"name": "mixed-language-red-assessment", "call": "assessRepository(fixtures.mixedUnsafe)", "expect": {"status":"red","findingIds":["forbidden:npm:legacy-auth","provenance:go:worker","vulnerability:pypi:parser:CVE-9"],"publication":null}},
+          {"name": "repaired-green-draft-only", "call": "assessRepository(fixtures.repairedGreen)", "expect": {"status":"green","publication":{"draft":true,"baseCommit":"abc123"}}},
+          {"name": "cancel-retains-evidence", "call": "cancelAssessment('run-42')", "expect": {"runId":"run-42","cancelled":true,"evidenceRetained":true}}
+          ,{"name":"idempotent-assessment-reuse","harness":"const first = assessRepository(fixtures.repairedGreen); const second = assessRepository(fixtures.repairedGreen); assert.equal(first.evidenceDigest, second.evidenceDigest); assert.deepEqual(first.findings, second.findings);"}
+        ],
+        "properties": ["same canonical request yields byte-identical findings and evidence digest", "no result can request a non-draft publication"]
+      }
+    },
+
+    {
+      "id": "inventory-domain",
+      "kind": "integrator",
+      "owner": "aegis",
+      "provides": {
+        "name": "InventoryDomain",
+        "operations": [{"name":"buildInventory","signature":"buildInventory(repository: RepositoryFixture, baseCommit: string) -> InventoryResult","properties":["components sorted by canonical purl","provenance never defaults to verified"]}],
+        "types": [{"name":"InventoryResult","definition":"{ digest: string; components: Component[]; provenance: ProvenanceResult[]; evidence: EvidenceRef[] }"},{"name":"Component","definition":"{ purl: string; version: string; licenses: string[]; evidencePaths: string[] }"},{"name":"ProvenanceResult","definition":"{ subject: string; state: 'verified'|'missing'|'malformed'|'mismatch'; reason: string }"},{"name":"EvidenceRef","definition":"{ logicalName: string; sha256: string; mediaType: string; size: number }"}]
+      },
+      "requires": [
+        {"node":"manifest-discovery","interface":"ManifestDiscovery"},
+        {"node":"inventory-normalizer","interface":"InventoryNormalizer"}
+      ],
+      "implementation": {"children":["manifest-discovery","inventory-normalizer"],"write_target":"src/inventory/index.ts","composition":"Discover contained manifests, then normalize components and validate supplied provenance against baseCommit and digests. Go and Python leaves use versioned newline-delimited canonical JSON over stdio."},
+      "acceptance": {"mandate_owner":"aegis","language":"typescript","cases":[{"name":"mixed-inventory","call":"buildInventory(fixtures.mixedRepo, 'abc123')","expect":{"purls":["pkg:golang/example/worker@1.0.0","pkg:npm/legacy-auth@2.0.0","pkg:pypi/parser@3.0.0"],"provenanceStates":["verified","mismatch","missing"]}},{"name":"deterministic-order","call":"buildInventory(fixtures.mixedRepoReordered, 'abc123')","expect":{"digest":"fixture-inventory-digest"}}]}
+    },
+    {
+      "id": "manifest-discovery",
+      "kind": "leaf",
+      "owner": "inventory-domain",
+      "provides": {
+        "name": "ManifestDiscovery",
+        "operations": [{"name":"discoverManifests","signature":"discoverManifests(tree: RepositoryTree) -> ManifestRef[]","properties":["supports Python TypeScript and Go manifests","sorted paths","rejects symlink escape"]}],
+        "types": [{"name":"ManifestRef","definition":"{ path: string; ecosystem: 'pypi'|'npm'|'golang'; sha256: string }"},{"name":"RepositoryTree","definition":"{ entries: { path: string; kind: 'file'|'directory'|'symlink'; target: string|null; sha256: string|null }[] }"}]
+      },
+      "implementation": {"language":"go","write_target":"internal/inventory/discovery.go"},
+      "acceptance": {"mandate_owner":"inventory-domain","language":"go","cases":[{"name":"three-ecosystems","call":"discoverManifests(fixtures.safeMixedTree)","expect":["go.mod","package-lock.json","requirements.txt"]},{"name":"symlink-escape","call":"discoverManifests(fixtures.escapingSymlink)","expect":{"error":"SYMLINK_ESCAPE"}}],"properties":["no returned path is absolute or contains a parent traversal"]}
+    },
+    {
+      "id": "inventory-normalizer",
+      "kind": "leaf",
+      "owner": "inventory-domain",
+      "provides": {
+        "name": "InventoryNormalizer",
+        "operations": [{"name":"normalizeInventory","signature":"normalizeInventory(manifests: ManifestRef[], sbom: unknown, provenance: unknown[], baseCommit: string) -> InventoryResult","properties":["deduplicates by canonical purl","stable ordering","digest and subject mismatches are rejected"]}],
+        "types": [{"name":"ManifestRef","definition":"{ path: string; ecosystem: 'pypi'|'npm'|'golang'; sha256: string }"},{"name":"Component","definition":"{ purl: string; version: string; licenses: string[]; evidencePaths: string[] }"},{"name":"ProvenanceResult","definition":"{ subject: string; state: 'verified'|'missing'|'malformed'|'mismatch'; reason: string }"},{"name":"EvidenceRef","definition":"{ logicalName: string; sha256: string; mediaType: string; size: number }"},{"name":"InventoryResult","definition":"{ digest: string; components: Component[]; provenance: ProvenanceResult[]; evidence: EvidenceRef[] }"}]
+      },
+      "implementation": {"language":"python","write_target":"aegis_inventory/normalize.py"},
+      "acceptance": {"mandate_owner":"inventory-domain","language":"python","cases":[{"name":"deduplicate-purl","call":"normalizeInventory(fixtures.duplicateComponents, null, [], 'abc123')","expect":{"componentCount":1,"purl":"pkg:npm/a@1.0.0","evidencePaths":["package-lock.json","package.json"]}},{"name":"provenance-mismatch","call":"normalizeInventory([], null, [fixtures.wrongSubject], 'abc123')","expect":{"state":"mismatch","reason":"subject digest does not match immutable base"}}]}
+    },
+
+    {
+      "id": "policy-domain",
+      "kind": "integrator",
+      "owner": "aegis",
+      "provides": {
+        "name": "PolicyDomain",
+        "operations": [{"name":"evaluatePolicy","signature":"evaluatePolicy(rawPolicy: unknown, inventory: InventoryResult, evaluationTime: string) -> PolicyResult","properties":["deny by default","stable finding IDs","explicit time only"]}],
+        "types": [{"name":"PolicyResult","definition":"{ policyDigest: string; findings: Finding[]; risk: RiskSummary }"},{"name":"Finding","definition":"{ id: string; ruleId: string; purl: string; severity: 'low'|'medium'|'high'|'critical'; waived: boolean; remediable: boolean; evidence: string[] }"},{"name":"RiskSummary","definition":"{ score: number; reasons: { findingId: string; contribution: number }[] }"},{"name":"PolicyRule","definition":"{ id: string; kind: 'license'|'forbidden'|'provenance'|'vulnerability'; severity: string; parameters: unknown }"},{"name":"Waiver","definition":"{ id: string; ruleId: string; purl: string; expiresAt: string; reason: string }"}]
+      },
+      "requires": [{"node":"policy-parser","interface":"PolicyParser"},{"node":"policy-evaluator","interface":"PolicyEvaluator"}],
+      "implementation": {"children":["policy-parser","policy-evaluator"],"write_target":"src/policy/index.ts","composition":"Parse and canonicalize the versioned policy, then evaluate components, provenance, vulnerabilities, licenses, and waivers at the supplied timestamp. Python evaluation uses versioned newline-delimited canonical JSON over stdio."},
+      "acceptance": {"mandate_owner":"aegis","language":"typescript","cases":[{"name":"waiver-and-findings","call":"evaluatePolicy(fixtures.policy, fixtures.inventory, '2027-01-01T00:00:00Z')","expect":{"activeWaiverSuppressed":true,"expiredWaiverSuppressed":false,"riskScore":92}},{"name":"malformed-policy-fails-closed","call":"evaluatePolicy({version:99}, fixtures.inventory, '2027-01-01T00:00:00Z')","expect":{"error":"UNSUPPORTED_POLICY_VERSION"}}]}
+    },
+    {
+      "id": "policy-parser",
+      "kind": "leaf",
+      "owner": "policy-domain",
+      "provides": {
+        "name": "PolicyParser",
+        "operations": [{"name":"parsePolicy","signature":"parsePolicy(raw: unknown) -> PolicyBundle","properties":["rejects unknown fields","canonical rule order","deny by default"]}],
+        "types": [{"name":"PolicyBundle","definition":"{ version: 1; rules: PolicyRule[]; waivers: Waiver[]; digest: string }"},{"name":"PolicyRule","definition":"{ id: string; kind: 'license'|'forbidden'|'provenance'|'vulnerability'; severity: string; parameters: unknown }"},{"name":"Waiver","definition":"{ id: string; ruleId: string; purl: string; expiresAt: string; reason: string }"}]
+      },
+      "implementation": {"language":"typescript","write_target":"src/policy/parser.ts"},
+      "acceptance": {"mandate_owner":"policy-domain","language":"typescript","cases":[{"name":"canonical-order","call":"parsePolicy(fixtures.reorderedPolicy)","expect":{"ruleIds":["forbidden","license","provenance","vulnerability"],"digest":"fixture-policy-digest"}},{"name":"unknown-field","call":"parsePolicy({version:1,rules:[],surprise:true})","expect":{"error":"UNKNOWN_POLICY_FIELD"}}]}
+    },
+    {
+      "id": "policy-evaluator",
+      "kind": "leaf",
+      "owner": "policy-domain",
+      "provides": {
+        "name": "PolicyEvaluator",
+        "operations": [{"name":"evaluateRules","signature":"evaluateRules(policy: PolicyBundle, inventory: InventoryResult, evaluationTime: string) -> PolicyResult","properties":["finding ID derives only from rule component and evidence","invalid waiver never suppresses","risk score bounded 0..100"]}],
+        "types": [{"name":"PolicyRule","definition":"{ id: string; kind: string; severity: string; parameters: unknown }"},{"name":"Waiver","definition":"{ id: string; ruleId: string; purl: string; expiresAt: string; reason: string }"},{"name":"PolicyBundle","definition":"{ version: 1; rules: PolicyRule[]; waivers: Waiver[]; digest: string }"},{"name":"Component","definition":"{ purl: string; version: string; licenses: string[]; evidencePaths: string[] }"},{"name":"ProvenanceResult","definition":"{ subject: string; state: 'verified'|'missing'|'malformed'|'mismatch'; reason: string }"},{"name":"EvidenceRef","definition":"{ logicalName: string; sha256: string; mediaType: string; size: number }"},{"name":"InventoryResult","definition":"{ digest: string; components: Component[]; provenance: ProvenanceResult[]; evidence: EvidenceRef[] }"},{"name":"Finding","definition":"{ id: string; ruleId: string; purl: string; severity: string; waived: boolean; remediable: boolean; evidence: string[] }"},{"name":"RiskSummary","definition":"{ score: number; reasons: { findingId: string; contribution: number }[] }"},{"name":"PolicyResult","definition":"{ policyDigest: string; findings: Finding[]; risk: RiskSummary }"}]
+      },
+      "implementation": {"language":"python","write_target":"aegis_policy/evaluator.py"},
+      "acceptance": {"mandate_owner":"policy-domain","language":"python","cases":[{"name":"expired-waiver","call":"evaluateRules(fixtures.policyWithExpiredWaiver, fixtures.inventory, '2027-01-01T00:00:00Z')","expect":{"waived":false,"findingId":"vulnerability:pypi:parser:CVE-9"}},{"name":"bounded-risk","call":"evaluateRules(fixtures.maximalPolicy, fixtures.unsafeInventory, '2027-01-01T00:00:00Z')","expect":{"riskScore":100}}],"properties":["permuting inventory input does not change findings or risk"]}
+    },
+
+    {
+      "id": "remediation-domain",
+      "kind": "integrator",
+      "owner": "aegis",
+      "provides": {
+        "name": "RemediationDomain",
+        "operations": [{"name":"remediate","signature":"remediate(baseCommit: string, findings: Finding[], inventory: InventoryResult, repository: RepositoryFixture, jobId: string) -> RemediationResult","properties":["only policy-marked findings","same job ID is idempotent","never applies stale preimage"]}],
+        "types": [{"name":"RemediationPlan","definition":"{ operations: { path: string; preimageSha256: string; postimageSha256: string; findingIds: string[] }[] }"},{"name":"ValidationResult","definition":"{ green: boolean; applied: boolean; patchDigest: string|null; tests: TestEvidence[]; error: string|null }"},{"name":"TestEvidence","definition":"{ command: string; exitCode: number; stdoutSha256: string; stderrSha256: string; durationMs: number }"},{"name":"RemediationResult","definition":"{ plan: RemediationPlan; patchDigest: string|null; validation: ValidationResult }"}]
+      },
+      "requires": [{"node":"remediation-planner","interface":"RemediationPlanner"},{"node":"patch-verifier","interface":"PatchVerifier"}],
+      "implementation": {"children":["remediation-planner","patch-verifier"],"write_target":"src/remediation/index.ts","composition":"Pass the root-produced inventory into the Python planner, then verify paths, preimages, content policy, manifest/lockfile consistency, affected tests, and idempotent application with the Go verifier. Both leaves use versioned newline-delimited canonical JSON over stdio and the verifier invokes only a network-denied sandbox adapter."},
+      "acceptance": {"mandate_owner":"aegis","language":"typescript","cases":[{"name":"permitted-update-only","call":"remediate('abc123', fixtures.findings, fixtures.inventory, fixtures.repo, 'job-7')","expect":{"changedPaths":["requirements.txt"],"addressed":["vulnerability:pypi:parser:CVE-9"],"green":true}},{"name":"retry-stale-preimage","call":"remediate('abc123', fixtures.findings, fixtures.inventory, fixtures.changedRepo, 'job-7')","expect":{"error":"PREIMAGE_MISMATCH","applied":false}}]}
+    },
+    {
+      "id": "remediation-planner",
+      "kind": "leaf",
+      "owner": "remediation-domain",
+      "provides": {
+        "name": "RemediationPlanner",
+        "operations": [{"name":"planRemediation","signature":"planRemediation(findings: Finding[], inventory: InventoryResult) -> RemediationPlan","properties":["exact write paths","only remediable unwaived findings","stable operation order"]}],
+        "types": [{"name":"Finding","definition":"{ id: string; ruleId: string; purl: string; severity: string; waived: boolean; remediable: boolean; evidence: string[] }"},{"name":"Component","definition":"{ purl: string; version: string; licenses: string[]; evidencePaths: string[] }"},{"name":"ProvenanceResult","definition":"{ subject: string; state: 'verified'|'missing'|'malformed'|'mismatch'; reason: string }"},{"name":"EvidenceRef","definition":"{ logicalName: string; sha256: string; mediaType: string; size: number }"},{"name":"InventoryResult","definition":"{ digest: string; components: Component[]; provenance: ProvenanceResult[]; evidence: EvidenceRef[] }"},{"name":"RemediationPlan","definition":"{ operations: { path: string; preimageSha256: string; postimageSha256: string; findingIds: string[] }[] }"}]
+      },
+      "implementation": {"language":"python","write_target":"aegis_remediation/planner.py"},
+      "acceptance": {"mandate_owner":"remediation-domain","language":"python","cases":[{"name":"excludes-forbidden-manual","call":"planRemediation(fixtures.mixedFindings, fixtures.inventory)","expect":{"operationCount":1,"findingIds":["vulnerability:pypi:parser:CVE-9"]}},{"name":"stable-order","call":"planRemediation(fixtures.reorderedFindings, fixtures.inventory)","expect":{"digest":"fixture-plan-digest"}}]}
+    },
+    {
+      "id": "patch-verifier",
+      "kind": "leaf",
+      "owner": "remediation-domain",
+      "provides": {
+        "name": "PatchVerifier",
+        "operations": [{"name":"verifyPatch","signature":"verifyPatch(plan: RemediationPlan, repository: RepositoryFixture, jobId: string) -> ValidationResult","properties":["rejects path and symlink escape","rejects secrets binaries and stale preimages","network denied","idempotent by job ID"]}],
+        "types": [{"name":"RemediationPlan","definition":"{ operations: { path: string; preimageSha256: string; postimageSha256: string; findingIds: string[] }[] }"},{"name":"RepositoryFixture","definition":"{ files: { path: string; sha256: string; content: string }[] }"},{"name":"ValidationResult","definition":"{ green: boolean; applied: boolean; patchDigest: string|null; tests: TestEvidence[]; error: string|null }"},{"name":"TestEvidence","definition":"{ command: string; exitCode: number; stdoutSha256: string; stderrSha256: string; durationMs: number }"}]
+      },
+      "implementation": {"language":"go","write_target":"internal/remediation/verifier.go"},
+      "acceptance": {"mandate_owner":"remediation-domain","language":"go","cases":[{"name":"traversal-rejected","call":"verifyPatch(fixtures.traversalPlan, fixtures.repo, 'job-1')","expect":{"green":false,"applied":false,"error":"PATH_ESCAPE"}},{"name":"idempotent-retry","call":"verifyPatch(fixtures.validPlan, fixtures.repo, 'job-repeat')","expect":{"applications":1,"sameDigestOnRetry":true}}],"properties":["failed validation produces no repository mutation"]}
+    },
+
+    {
+      "id": "evidence-domain",
+      "kind": "integrator",
+      "owner": "aegis",
+      "provides": {
+        "name": "EvidenceDomain",
+        "operations": [{"name":"buildEvidence","signature":"buildEvidence(runId: string, inputs: EvidenceInput) -> EvidencePackage","properties":["canonical SHA-256 index","hash-chain verifies","attestation subject binds output"]},{"name":"verifyEvidence","signature":"verifyEvidence(pkg: EvidencePackage) -> VerificationResult","properties":["recomputes every content digest","verifies audit links and attestation subject","fails closed"]}],
+        "types": [{"name":"EvidencePackage","definition":"{ indexDigest: string; auditHead: string; attestation: Attestation; artifactRefs: EvidenceRef[]; items: EvidenceItem[] }"},{"name":"EvidenceInput","definition":"{ items: EvidenceItem[]; events: AuditEvent[] }"},{"name":"EvidenceItem","definition":"{ logicalName: string; mediaType: string; bytesBase64: string }"},{"name":"AuditEvent","definition":"{ sequence: number; kind: string; payloadSha256: string; previousHash: string }"},{"name":"EvidenceRef","definition":"{ logicalName: string; sha256: string; mediaType: string; size: number }"},{"name":"Attestation","definition":"{ statementType: 'https://in-toto.io/Statement/v1'; subjectSha256: string; predicate: unknown }"},{"name":"VerificationResult","definition":"{ valid: boolean; error: string|null }"}]
+      },
+      "requires": [{"node":"evidence-bundler","interface":"EvidenceBundler"},{"node":"audit-attestor","interface":"AuditAttestor"}],
+      "implementation": {"children":["evidence-bundler","audit-attestor"],"write_target":"src/evidence/index.ts","composition":"Canonicalize and hash every evidence item, construct the ordered audit chain, then create an in-toto-compatible attestation bound to the index digest. Verification recomputes the index before invoking audit-attestor verification. Go leaves use versioned newline-delimited canonical JSON over stdio."},
+      "acceptance": {"mandate_owner":"aegis","language":"typescript","cases":[{"name":"stable-package","call":"buildEvidence('run-42', fixtures.evidenceInput)","expect":{"indexDigest":"fixture-index-digest","chainValid":true,"subject":"fixture-index-digest"}},{"name":"audit-tamper-detected","call":"verifyEvidence(fixtures.auditTamperedPackage)","expect":{"valid":false,"error":"AUDIT_CHAIN_MISMATCH"}},{"name":"content-tamper-detected","call":"verifyEvidence(fixtures.contentTamperedPackage)","expect":{"valid":false,"error":"CONTENT_DIGEST_MISMATCH"}}]}
+    },
+    {
+      "id": "evidence-bundler",
+      "kind": "leaf",
+      "owner": "evidence-domain",
+      "provides": {
+        "name": "EvidenceBundler",
+        "operations": [{"name":"bundleEvidence","signature":"bundleEvidence(items: EvidenceItem[]) -> EvidenceIndex","properties":["canonical JSON","sorted logical names","content addressed by SHA-256"]}],
+        "types": [{"name":"EvidenceIndex","definition":"{ digest: string; entries: { name: string; mediaType: string; size: number; sha256: string }[] }"},{"name":"EvidenceItem","definition":"{ logicalName: string; mediaType: string; bytesBase64: string }"}]
+      },
+      "implementation": {"language":"go","write_target":"internal/evidence/bundler.go"},
+      "acceptance": {"mandate_owner":"evidence-domain","language":"go","cases":[{"name":"canonical-index","call":"bundleEvidence(fixtures.reorderedEvidence)","expect":{"names":["assessment.json","patch.diff","tests.json"],"digest":"fixture-index-digest"}},{"name":"digest-change","call":"bundleEvidence(fixtures.oneByteChangedEvidence)","expect":{"digestNot":"fixture-index-digest"}}]}
+    },
+    {
+      "id": "audit-attestor",
+      "kind": "leaf",
+      "owner": "evidence-domain",
+      "provides": {
+        "name": "AuditAttestor",
+        "operations": [{"name":"attest","signature":"attest(runId: string, index: EvidenceIndex, events: AuditEvent[]) -> AuditAttestation","properties":["each event binds previous hash","attestation subject equals index digest","no secrets in predicate"]},{"name":"verifyAttestation","signature":"verifyAttestation(index: EvidenceIndex, events: AuditEvent[], attestation: AuditAttestation) -> VerificationResult","properties":["recomputes chain","binds subject to index","fails closed"]}],
+        "types": [{"name":"EvidenceIndex","definition":"{ digest: string; entries: { name: string; mediaType: string; size: number; sha256: string }[] }"},{"name":"AuditAttestation","definition":"{ auditHead: string; chainValid: boolean; statement: Attestation }"},{"name":"AuditEvent","definition":"{ sequence: number; kind: string; payloadSha256: string; previousHash: string }"},{"name":"Attestation","definition":"{ statementType: 'https://in-toto.io/Statement/v1'; subjectSha256: string; predicate: unknown }"},{"name":"VerificationResult","definition":"{ valid: boolean; error: string|null }"}]
+      },
+      "implementation": {"language":"go","write_target":"internal/evidence/attestor.go"},
+      "acceptance": {"mandate_owner":"evidence-domain","language":"go","cases":[{"name":"valid-chain","call":"attest('run-42', fixtures.index, fixtures.events)","expect":{"chainValid":true,"subject":"fixture-index-digest"}},{"name":"reordered-events","call":"attest('run-42', fixtures.index, fixtures.reorderedEvents)","expect":{"chainValid":false,"error":"PREVIOUS_HASH_MISMATCH"}}]}
+    },
+
+    {
+      "id": "operator-domain",
+      "kind": "integrator",
+      "owner": "aegis",
+      "provides": {
+        "name": "OperatorDomain",
+        "operations": [{"name":"renderAssessment","signature":"renderAssessment(result: AssessmentResult, evidence: EvidencePackage) -> OperatorView","properties":["no absolute workspace paths","secrets redacted"]},{"name":"decidePublication","signature":"decidePublication(result: AssessmentResult, evidence: EvidencePackage) -> PublicationDecision","properties":["green evidence required","draft always true","human merge required"]}],
+        "types": [{"name":"OperatorView","definition":"{ runId: string; status: string; findings: unknown[]; evidenceRefs: string[] }"},{"name":"DraftPublication","definition":"{ draft: true; baseCommit: string; title: string; body: string; idempotencyKey: string }"},{"name":"PublicationDecision","definition":"{ allowed: boolean; publication: DraftPublication|null; reason: string }"}]
+      },
+      "requires": [{"node":"control-api","interface":"ControlApi"},{"node":"review-publisher","interface":"ReviewPublisher"}],
+      "implementation": {"children":["control-api","review-publisher"],"write_target":"src/operator/index.ts","composition":"Expose redacted status and evidence views through the typed API, then render the deterministic report and gate a draft-only publication request. The Go API uses versioned newline-delimited canonical JSON over stdio; external HTTP and Git hosting remain replaceable adapters outside deterministic core evaluation."},
+      "acceptance": {"mandate_owner":"aegis","language":"typescript","cases":[{"name":"red-blocks-publication","call":"decidePublication(fixtures.redResult, fixtures.validEvidence)","expect":{"allowed":false,"publication":null,"reason":"assessment is not green"}},{"name":"green-draft","call":"decidePublication(fixtures.greenResult, fixtures.validEvidence)","expect":{"allowed":true,"publication":{"draft":true,"baseCommit":"abc123","idempotencyKey":"run-42"}}}]}
+    },
+    {
+      "id": "control-api",
+      "kind": "leaf",
+      "owner": "operator-domain",
+      "provides": {
+        "name": "ControlApi",
+        "operations": [{"name":"projectStatus","signature":"projectStatus(result: AssessmentResult) -> StatusView","properties":["redacts secrets","omits absolute paths"]},{"name":"requestCancellation","signature":"requestCancellation(runId: string, idempotencyKey: string) -> CancellationCommand","properties":["idempotent","monotonic"]}],
+        "types": [{"name":"AssessmentResult","definition":"{ runId: string; status: string; findings: unknown[]; evidenceDigest: string; publication: unknown|null }"},{"name":"StatusView","definition":"{ runId: string; status: string; findingCounts: { severity: string; count: number }[]; artifactIds: string[] }"},{"name":"CancellationCommand","definition":"{ runId: string; idempotencyKey: string; requested: true }"}]
+      },
+      "implementation": {"language":"go","write_target":"internal/api/contracts.go"},
+      "acceptance": {"mandate_owner":"operator-domain","language":"go","cases":[{"name":"redacted-status","call":"projectStatus(fixtures.resultWithSecretAndPath)","expect":{"containsSecret":false,"containsAbsolutePath":false}},{"name":"stable-cancel","call":"requestCancellation('run-42','cancel-42')","expect":{"runId":"run-42","idempotencyKey":"cancel-42"}}]}
+    },
+    {
+      "id": "review-publisher",
+      "kind": "leaf",
+      "owner": "operator-domain",
+      "provides": {
+        "name": "ReviewPublisher",
+        "operations": [{"name":"renderReview","signature":"renderReview(result: AssessmentResult, evidence: EvidencePackage) -> ReviewReport","properties":["deterministic sections","includes residual risks and digests"]},{"name":"draftRequest","signature":"draftRequest(report: ReviewReport, baseCommit: string, runId: string) -> DraftPublication","properties":["draft true","run ID is idempotency key","cannot approve or merge"]}],
+        "types": [{"name":"AssessmentResult","definition":"{ runId: string; status: string; findings: unknown[]; evidenceDigest: string; publication: unknown|null }"},{"name":"EvidencePackage","definition":"{ indexDigest: string; auditHead: string; attestation: unknown; artifactRefs: unknown[] }"},{"name":"ReviewReport","definition":"{ title: string; sections: { heading: string; markdown: string }[]; evidenceDigest: string }"},{"name":"DraftPublication","definition":"{ draft: true; baseCommit: string; title: string; body: string; idempotencyKey: string }"}]
+      },
+      "implementation": {"language":"typescript","write_target":"src/operator/review-publisher.ts"},
+      "acceptance": {"mandate_owner":"operator-domain","language":"typescript","cases":[{"name":"complete-report","call":"renderReview(fixtures.greenResult, fixtures.validEvidence)","expect":{"sections":["Summary","Findings","Remediation","Tests","Evidence","Residual Risks"]}},{"name":"draft-invariant","call":"draftRequest(fixtures.report, 'abc123', 'run-42')","expect":{"draft":true,"baseCommit":"abc123","idempotencyKey":"run-42"}}],"properties":["no operation emits approve merge or force-push intent"]}
+    }
+  ]
+}

@@ -44,7 +44,7 @@ test("Claude Code project launcher keeps stdout protocol-clean", async () => {
   await client.connect(transport);
   try {
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 7);
+    assert.equal(tools.tools.length, 11);
     const resources = await client.listResources();
     assert.ok(resources.resources.some((resource) => resource.uri === "foundry://workspaces/foundry"));
   } finally {

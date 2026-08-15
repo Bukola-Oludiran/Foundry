@@ -11,7 +11,7 @@ test("Codex plugin registers the workspace-scoped Foundry MCP server", () => {
   assert.equal(manifest.name, "foundry");
   assert.equal(manifest.author.name, "Bukola-Oludiran");
   assert.equal(manifest.mcpServers, "./.mcp.json");
-  assert.deepEqual(config.mcpServers.foundry.args, ["--silent", "--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:stdio"]);
+  assert.deepEqual(config.mcpServers.foundry.args, ["--silent", "--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:codex"]);
   assert.ok(config.mcpServers.foundry.env_vars.includes("FOUNDRY_WORKSPACE_ROOTS"));
 });
 

@@ -22,6 +22,7 @@ test:
 	cargo test --manifest-path gr-host/Cargo.toml --workspace
 	npm run test:mcp
 	npm run test:sidecar
+	npm run test:collaboration
 	npm test --prefix pi-pool
 
 test-local:

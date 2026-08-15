@@ -18,3 +18,5 @@ node_modules/
 # Logs and caches
 *.log
 .cache/
+.foundry/
+.leankg/
