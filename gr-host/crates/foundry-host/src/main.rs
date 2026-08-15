@@ -13,6 +13,7 @@
 //!
 //! Usage: foundry-host --ir <path> [--pi-pool URL] [--workspace DIR] [--rearchitect NODE]
 
+mod durable;
 mod http;
 use http::http_post_json;
 
@@ -40,6 +41,7 @@ enum Verdict {
     Error(String),
 }
 
+#[derive(Clone)]
 struct Job {
     build_req: Value,
     test_req: Value,
@@ -264,6 +266,7 @@ fn main() {
             .into_owned()
     });
     let rearchitect = arg(&args, "--rearchitect");
+    let durability = arg(&args, "--durability").unwrap_or_else(|| "local".to_string());
     let base_commit = arg(&args, "--base").unwrap_or_else(|| "uncommitted".to_string());
     let worker_token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
         eprintln!("FOUNDRY_WORKER_TOKEN is required");
@@ -312,6 +315,35 @@ fn main() {
         &run_id,
         &base_commit,
     ));
+    if durability == "local" {
+        let durability_dir = arg(&args, "--durability-dir")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(&workspace_root)
+                    .join(".foundry")
+                    .join("durability")
+                    .join(&ir_digest)
+            });
+        durable::run(
+            &ir,
+            &plan,
+            jobs.as_ref(),
+            raw.as_bytes(),
+            &base,
+            &worker_token,
+            durability_dir,
+            &run_digest,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("durable build failed: {error}");
+            std::process::exit(1);
+        });
+        return;
+    }
+    if durability != "off" {
+        eprintln!("--durability must be `local` or `off`");
+        std::process::exit(2);
+    }
     let verdicts: Rc<RefCell<HashMap<String, Verdict>>> = Rc::new(RefCell::new(
         ir.nodes
             .iter()

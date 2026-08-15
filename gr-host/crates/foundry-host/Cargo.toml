@@ -11,6 +11,9 @@ path = "src/main.rs"
 [dependencies]
 foundry-ir = { path = "../foundry-ir" }
 graphreact-core.workspace = true
+graphreact-durable-runtime.workspace = true
+graphreact-persistence.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+futures.workspace = true

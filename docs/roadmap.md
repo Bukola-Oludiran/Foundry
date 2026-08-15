@@ -26,12 +26,15 @@ Status: implemented; CI confirmation pending on the first pushed revision.
 
 ## M3 — durable supervised builds
 
-Status: next.
+Status: in progress; the crash-recovery execution slice is implemented.
 
-- One GraphReact local durable run per build.
-- Durable worker/Git effects, build artifacts, cancellation, and restart recovery.
-- Real GraphReact ownership supervision and manager decisions.
-- Scheduler messages replace the synchronous generation loop.
+- Implemented: one GraphReact local durable run per build, durable keyed state, scheduler-message
+  dependency gating, persisted worker effects, GraphReact artifacts, exact ownership supervision,
+  bounded repair decisions, snapshots, terminal recovery, and disk-backed worker job idempotency.
+- Verified: an authenticated OCI-isolated four-node workflow reaches green, writes a verified
+  snapshot, and a second host process recovers the succeeded run without rebuilding it.
+- Remaining: durable cancellation/control-plane admission, cooperative in-flight container
+  cancellation, repository/worktree effects, and the automated subprocess crash matrix.
 
 ## M4 — spec-to-IR architecture
 

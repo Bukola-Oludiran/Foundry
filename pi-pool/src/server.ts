@@ -10,9 +10,20 @@ import {
   type ServerResponse,
   type Server,
 } from "node:http";
-import { readFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { pathToFileURL } from "node:url";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { dirname, join } from "node:path";
 import { buildNode } from "./doer.ts";
 import { executeTest, type TesterConfig } from "./tester.ts";
 import { StubLlm, PiAiLlm, type LlmClient } from "./llm.ts";
@@ -79,6 +90,7 @@ export interface FoundryServerOptions {
   maxBodyBytes?: number;
   workspaceRoot?: string;
   requireSandbox?: boolean;
+  idempotencyDir?: string;
 }
 
 function stable(value: unknown): string {
@@ -119,6 +131,84 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
     { digest: string; result: Promise<unknown> }
   >();
 
+  if (opts.idempotencyDir) mkdirSync(opts.idempotencyDir, { recursive: true });
+
+  const recordPath = (key: string): string | undefined =>
+    opts.idempotencyDir
+      ? join(
+          opts.idempotencyDir,
+          `${createHash("sha256").update(key).digest("hex")}.json`,
+        )
+      : undefined;
+
+  const loadRecord = (
+    key: string,
+  ): { digest: string; result: unknown } | undefined => {
+    const path = recordPath(key);
+    if (!path || !existsSync(path)) return undefined;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+        version?: unknown;
+        key?: unknown;
+        digest?: unknown;
+        result?: unknown;
+      };
+      if (
+        parsed.version !== 1 ||
+        parsed.key !== key ||
+        typeof parsed.digest !== "string"
+      ) {
+        throw new Error("invalid idempotency record");
+      }
+      return { digest: parsed.digest, result: parsed.result };
+    } catch (error) {
+      throw new RequestError(
+        500,
+        "IDEMPOTENCY_STORE_CORRUPT",
+        `cannot read durable job record: ${String((error as Error).message)}`,
+      );
+    }
+  };
+
+  const persistRecord = (
+    key: string,
+    digest: string,
+    result: unknown,
+  ): void => {
+    const path = recordPath(key);
+    if (!path) return;
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const bytes = JSON.stringify({ version: 1, key, digest, result });
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(temporary, "wx", 0o600);
+      writeFileSync(descriptor, bytes, "utf8");
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+      renameSync(temporary, path);
+      const directory = openSync(dirname(path), "r");
+      try {
+        fsyncSync(directory);
+      } finally {
+        closeSync(directory);
+      }
+    } catch (error) {
+      if (descriptor !== undefined) closeSync(descriptor);
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // Nothing to clean up after a successful rename.
+      }
+      throw new RequestError(
+        500,
+        "IDEMPOTENCY_STORE_WRITE_FAILED",
+        `cannot persist durable job result: ${String((error as Error).message)}`,
+        true,
+      );
+    }
+  };
+
   const once = (
     route: string,
     jobId: string,
@@ -138,7 +228,28 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
       }
       return prior.result;
     }
-    const result = action();
+    const durable = loadRecord(key);
+    if (durable) {
+      if (durable.digest !== digest) {
+        throw new RequestError(
+          409,
+          "IDEMPOTENCY_CONFLICT",
+          "job_id was reused with different content",
+        );
+      }
+      const result = Promise.resolve(durable.result);
+      idempotency.set(key, { digest, result });
+      return result;
+    }
+    const result = action()
+      .then((value) => {
+        persistRecord(key, digest, value);
+        return value;
+      })
+      .catch((error: unknown) => {
+        idempotency.delete(key);
+        throw error;
+      });
     if (idempotency.size >= 10_000) {
       const oldest = idempotency.keys().next().value;
       if (oldest) idempotency.delete(oldest);
@@ -257,11 +368,11 @@ if (isMain) {
             mode: "piston",
             pistonUrl: process.env.PISTON_URL ?? "http://127.0.0.1:2000",
           }
-        : process.env.FOUNDRY_ALLOW_INSECURE_LOCAL === "1"
+        : process.env.FOUNDRY_ALLOW_LOCAL_TESTER === "1"
           ? { mode: "local" }
           : (() => {
               throw new Error(
-                "FOUNDRY_TESTER=piston is required outside insecure local mode",
+                "FOUNDRY_TESTER=piston is required unless FOUNDRY_ALLOW_LOCAL_TESTER=1",
               );
             })();
     const port = Number(process.env.PORT ?? 8787);
@@ -269,6 +380,7 @@ if (isMain) {
     const allowUnauthenticated =
       process.env.FOUNDRY_ALLOW_INSECURE_LOCAL === "1";
     const workspaceRoot = process.env.FOUNDRY_WORKSPACE_ROOT;
+    const idempotencyDir = process.env.FOUNDRY_WORKER_STATE_DIR;
     if (!allowUnauthenticated && (!authToken || authToken.length < 32)) {
       throw new Error(
         "FOUNDRY_WORKER_TOKEN must contain at least 32 characters",
@@ -277,6 +389,9 @@ if (isMain) {
     if (!allowUnauthenticated && !workspaceRoot) {
       throw new Error("FOUNDRY_WORKSPACE_ROOT is required");
     }
+    if (!allowUnauthenticated && !idempotencyDir) {
+      throw new Error("FOUNDRY_WORKER_STATE_DIR is required");
+    }
     createFoundryServer({
       llm,
       tester,
@@ -284,6 +399,7 @@ if (isMain) {
       allowUnauthenticated,
       workspaceRoot,
       requireSandbox: !allowUnauthenticated,
+      idempotencyDir,
     }).listen(port, "127.0.0.1", () => {
       console.log(
         `[pi-pool] listening on :${port} — LLM=${llmLabel}, tester=${tester.mode}`,
