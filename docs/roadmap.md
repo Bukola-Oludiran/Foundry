@@ -64,11 +64,15 @@ Status: in progress; the versioned boundary and structural-diff validator are im
 
 ## M6 — Git review delivery
 
-Status: planned.
+Status: in progress; isolated worktrees, guarded commits, and draft-only publication are implemented.
 
-- Isolated run worktrees and repository-provider boundary.
-- Scope/secret/binary checks, intentional commits, and review summaries.
-- Idempotent draft GitHub pull requests; Foundry never approves or merges.
+- Implemented: replaceable repository/publisher traits, immutable-base per-run worktrees and
+  `foundry/<run-id>` branches, repository-configured commit identity, IR write-scope checks, and
+  fail-closed secret/symlink/binary/size checks.
+- Implemented: durable status verification before publication and idempotent GitHub draft lookup,
+  push, and creation. There is deliberately no approve, merge, force-push, or base mutation path.
+- Remaining: generate the complete evidence-rich review summary from durable artifacts, bind Git
+  prepare/commit/publish themselves as durable effects, and add a GitHub fixture acceptance test.
 
 ## Deferred
 

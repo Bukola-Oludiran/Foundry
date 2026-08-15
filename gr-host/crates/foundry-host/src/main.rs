@@ -16,7 +16,12 @@
 mod architect;
 mod durable;
 mod http;
+mod repository;
 use http::http_post_json;
+use repository::{
+    DiffPolicy, GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher,
+    RepositoryProvider,
+};
 
 use foundry_ir::types::{Ir, Kind, Node};
 use foundry_ir::{compile, BuildPlan};
@@ -27,7 +32,7 @@ use graphreact_core::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -399,6 +404,82 @@ fn main() {
         println!("cancellation requested for {run_id}");
         return;
     }
+    if args.get(1).is_some_and(|value| value == "publish") {
+        let Some(run_id) = arg(&args, "--run") else {
+            eprintln!(
+                "usage: foundry-host publish --run <id> --repo <path> --base <branch> --draft-pr"
+            );
+            std::process::exit(2);
+        };
+        let Some(repository) = arg(&args, "--repo") else {
+            eprintln!(
+                "usage: foundry-host publish --run <id> --repo <path> --base <branch> --draft-pr"
+            );
+            std::process::exit(2);
+        };
+        if !has_flag(&args, "--draft-pr") {
+            eprintln!("Foundry only publishes draft pull requests; pass --draft-pr");
+            std::process::exit(2);
+        }
+        let Some(durability_dir) = arg(&args, "--durability-dir") else {
+            eprintln!(
+                "publish requires --durability-dir so the successful durable run can be verified"
+            );
+            std::process::exit(2);
+        };
+        let status = durable::run_status(std::path::Path::new(&durability_dir), &run_id)
+            .unwrap_or_else(|error| {
+                eprintln!("cannot verify durable run: {error}");
+                std::process::exit(1);
+            });
+        if status != graphreact_persistence::RunStatus::Succeeded {
+            eprintln!("only a succeeded durable run can be published (status: {status:?})");
+            std::process::exit(1);
+        }
+        let base_branch = arg(&args, "--base").unwrap_or_else(|| "main".into());
+        let summary = arg(&args, "--summary")
+            .map(|path| std::fs::read_to_string(path).unwrap_or_else(|error| {
+                eprintln!("read review summary: {error}");
+                std::process::exit(1);
+            }))
+            .unwrap_or_else(|| {
+                format!(
+                    "## Foundry build\n\n- Durable run: `{run_id}`\n- Human review and merge are required.\n\n## Residual risks\n\nSee attached run artifacts and test evidence before approval."
+                )
+            });
+        let publisher = GitHubRepositoryProvider;
+        let url = publisher
+            .publish_draft(
+                std::path::Path::new(&repository),
+                &run_id,
+                &base_branch,
+                &format!("Foundry build {run_id}"),
+                &summary,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("draft publication failed: {error}");
+                std::process::exit(1);
+            });
+        println!("draft pull request: {url}");
+        return;
+    }
+    if args.get(1).is_some_and(|value| value == "status") {
+        let Some(run_id) = arg(&args, "--run") else {
+            eprintln!("usage: foundry-host status --run <id> --durability-dir <dir>");
+            std::process::exit(2);
+        };
+        let Some(durability_dir) = arg(&args, "--durability-dir") else {
+            eprintln!("usage: foundry-host status --run <id> --durability-dir <dir>");
+            std::process::exit(2);
+        };
+        let status = durable::run_status(std::path::Path::new(&durability_dir), &run_id)
+            .unwrap_or_else(|error| {
+                eprintln!("status failed: {error}");
+                std::process::exit(1);
+            });
+        println!("{run_id}: {status:?}");
+        return;
+    }
     let Some(ir_path) = arg(&args, "--ir") else {
         eprintln!("usage: foundry-host --ir <path> [--pi-pool URL] [--workspace DIR] [--rearchitect NODE]");
         std::process::exit(2);
@@ -412,7 +493,7 @@ fn main() {
     });
     let rearchitect = arg(&args, "--rearchitect");
     let durability = arg(&args, "--durability").unwrap_or_else(|| "local".to_string());
-    let base_commit = arg(&args, "--base").unwrap_or_else(|| "uncommitted".to_string());
+    let mut base_commit = arg(&args, "--base").unwrap_or_else(|| "uncommitted".to_string());
     let raw = std::fs::read_to_string(&ir_path).unwrap_or_else(|e| {
         eprintln!("read {ir_path}: {e}");
         std::process::exit(1);
@@ -427,12 +508,10 @@ fn main() {
         Sha256::digest(format!("{ir_digest}:{base_commit}").as_bytes())
     );
     let run_id = format!("run-{}", &run_digest[..16]);
-    let ws = std::path::Path::new(&workspace_root)
+    let attempt_path = std::path::Path::new(&workspace_root)
         .join(".foundry")
         .join("attempts")
-        .join(&run_id)
-        .to_string_lossy()
-        .into_owned();
+        .join(&run_id);
     let plan = compile(&ir).unwrap_or_else(|errs| {
         eprintln!("IR did not compile:");
         for e in &errs {
@@ -451,6 +530,25 @@ fn main() {
         eprintln!("FOUNDRY_WORKER_TOKEN is required");
         std::process::exit(2);
     });
+    let repository = LocalGitRepository;
+    let run_worktree = arg(&args, "--repo").map(|repository_path| {
+        repository
+            .prepare_worktree(
+                std::path::Path::new(&repository_path),
+                &attempt_path,
+                &base_commit,
+                &run_id,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("prepare run worktree: {error}");
+                std::process::exit(1);
+            })
+    });
+    if let Some(worktree) = &run_worktree {
+        base_commit.clone_from(&worktree.base_commit);
+        println!("  branch:       {}", worktree.branch);
+    }
+    let ws = attempt_path.to_string_lossy().into_owned();
     std::fs::create_dir_all(format!("{ws}/src")).ok();
 
     println!("Foundry host: {} ({} nodes)", ir.spec.name, ir.nodes.len());
@@ -489,6 +587,35 @@ fn main() {
             eprintln!("durable build failed: {error}");
             std::process::exit(1);
         });
+        if let Some(worktree) = &run_worktree {
+            let policy = DiffPolicy {
+                allowed_paths: plan
+                    .write_targets
+                    .values()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                max_file_bytes: 4 * 1024 * 1024,
+            };
+            let paths = repository
+                .validate_diff(worktree, &policy)
+                .unwrap_or_else(|error| {
+                    eprintln!("final diff rejected: {error}");
+                    std::process::exit(1);
+                });
+            if !paths.is_empty() {
+                let commit = repository
+                    .commit(
+                        worktree,
+                        &paths,
+                        &format!("Build {} with Foundry ({run_id})", ir.spec.name),
+                    )
+                    .unwrap_or_else(|error| {
+                        eprintln!("commit green build: {error}");
+                        std::process::exit(1);
+                    });
+                println!("  committed:    {commit}");
+            }
+        }
         return;
     }
     if durability != "off" {

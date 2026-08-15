@@ -69,6 +69,9 @@ cargo run --manifest-path gr-host/Cargo.toml -- build \
 cargo run --manifest-path gr-host/Cargo.toml -- rearchitect \
   --ir accepted.ir.json --proposal proposed.ir.json --node failing-node \
   --reason "acceptance failures exhausted repair" --output structural-diff.json
+cargo run --manifest-path gr-host/Cargo.toml -- publish \
+  --run <durable-run-id> --durability-dir <run-store> \
+  --repo <worktree> --base main --draft-pr --summary review.md
 ```
 
 `architect` calls the authenticated worker, retries invalid proposals with exact Rust compiler

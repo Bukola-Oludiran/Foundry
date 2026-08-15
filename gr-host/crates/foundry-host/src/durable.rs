@@ -13,13 +13,13 @@ use graphreact_core::{
     RestartTracker, Scheduler, SuperviseDecision, Supervisor,
 };
 use graphreact_durable_runtime::{
-    cancel_run, dispatch_pending_effects, enqueue_durable_message, install_local, recover,
+    cancel_run, dispatch_pending_effects, enqueue_durable_message, get_run, install_local, recover,
     write_runtime_snapshot, AdapterFuture, DurableEffectAdapter, EffectAdapterError,
     EffectAdapterRegistry,
 };
 use graphreact_persistence::{
     canonical_json_bytes, AttemptId, CorrelationId, DeploymentDigest, DeploymentId,
-    PersistenceEngine, ReplayPolicy, RunId, RunStatus, RuntimeRecordV1,
+    LocalPersistence, PersistenceEngine, ReplayPolicy, RunId, RunStatus, RuntimeRecordV1,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -322,6 +322,43 @@ fn deployment_id(root: &Path) -> Result<DeploymentId, String> {
     Ok(id)
 }
 
+fn decode_digest(value: &str) -> Result<DeploymentDigest, String> {
+    if value.len() != 64 {
+        return Err("deployment digest must contain 64 hexadecimal characters".into());
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(DeploymentDigest(bytes))
+}
+
+pub fn run_status(durability_dir: &Path, run_id: &str) -> Result<RunStatus, String> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|error| error.to_string())?;
+    let deployment_id = DeploymentId::parse(
+        std::fs::read_to_string(durability_dir.join("deployment-id"))
+            .map_err(|error| error.to_string())?
+            .trim()
+            .to_owned(),
+    )
+    .map_err(|error| error.to_string())?;
+    let digest = decode_digest(
+        std::fs::read_to_string(durability_dir.join("deployment-digest"))
+            .map_err(|error| error.to_string())?
+            .trim(),
+    )?;
+    let engine = LocalPersistence::open(graphreact_persistence::LocalConfig::new(
+        durability_dir,
+        deployment_id,
+        digest,
+    ))
+    .map_err(|error| error.to_string())?;
+    block_on(get_run(&engine, &run_id))
+        .map(|info| info.status)
+        .map_err(|error| error.to_string())
+}
+
 fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -456,10 +493,20 @@ pub fn run(
         .register_node(root_definition, ir.root.as_str(), Attrs::new(), 0)
         .map_err(|error| error.to_string())?;
 
+    let digest = DeploymentDigest::of(raw_ir);
+    std::fs::create_dir_all(&durability_dir).map_err(|error| error.to_string())?;
+    let digest_path = durability_dir.join("deployment-digest");
+    if let Ok(existing) = std::fs::read_to_string(&digest_path) {
+        if existing.trim() != digest.hex() {
+            return Err("durability directory belongs to a different IR deployment".into());
+        }
+    } else {
+        std::fs::write(&digest_path, digest.hex()).map_err(|error| error.to_string())?;
+    }
     let config = graphreact_persistence::LocalConfig::new(
         &durability_dir,
         deployment_id(&durability_dir)?,
-        DeploymentDigest::of(raw_ir),
+        digest,
     );
     let engine = install_local(&mut scheduler, config).map_err(|error| error.to_string())?;
     scheduler.install_supervise_decision_hook(Arc::new(|_supervisor, child, reason| {
