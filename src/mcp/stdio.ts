@@ -12,6 +12,7 @@ async function shutdown(code = 0): Promise<void> {
   if (closing) return;
   closing = true;
   await handle.close();
+  await client.close();
   process.exit(code);
 }
 

@@ -12,7 +12,7 @@ async function connect(mode: "legacy" | "modern"): Promise<void> {
     command: process.execPath,
     args: ["--import", "tsx", "src/mcp/stdio.ts"],
     cwd: process.cwd(),
-    env: { ...process.env, FOUNDRY_HOST_BIN: process.execPath, FOUNDRY_WORKSPACE_ROOTS: `test=${workspace}` } as Record<string, string>,
+    env: { ...process.env, FOUNDRY_HOST_BIN: process.execPath, FOUNDRY_HOST_TRANSPORT: "direct", FOUNDRY_WORKSPACE_ROOTS: `test=${workspace}` } as Record<string, string>,
     stderr: "pipe",
   });
   const client = new Client({ name: `${mode}-foundry-test`, version: "1" }, mode === "modern" ? { versionNegotiation: { mode: { pin: "2026-07-28" } } } : { versionNegotiation: { mode: "legacy" } });

@@ -6,6 +6,7 @@
       "env_vars": [
         "FOUNDRY_WORKSPACE_ROOTS",
         "FOUNDRY_HOST_BIN",
+        "FOUNDRY_HOST_TRANSPORT",
         "FOUNDRY_WORKER_TOKEN",
         "PISTON_URL",
         "GH_TOKEN",

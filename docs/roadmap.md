@@ -99,9 +99,12 @@ Status: first durable-host façade implemented; richer project authoring remains
 - Preserved: GraphReact persistence remains authoritative for build state, effects, artifacts,
   cancellation, and publication eligibility. The alternate branch's SQLite build authority and
   in-memory scheduler sidecar were intentionally not imported.
-- Remaining: a stable structured Rust sidecar/API, cancellation propagation from MCP transport to
-  child processes, Claude Code certification, richer architecture project resources, and the
-  separately versioned recursive product IR.
+- Implemented: a versioned, allowlisted JSON-lines Rust sidecar with structured run, status, and
+  publication results; the MCP client supervises and restarts it without introducing another
+  persistence authority.
+- Remaining: cancellation propagation from MCP transport to child processes, Claude Code
+  certification, richer architecture project resources, and the separately versioned recursive
+  product IR.
 
 ## Deferred
 

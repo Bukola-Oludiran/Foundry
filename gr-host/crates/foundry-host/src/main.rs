@@ -17,6 +17,7 @@ mod architect;
 mod durable;
 mod http;
 mod repository;
+mod sidecar;
 use http::http_post_json;
 use repository::{
     git_revision, DiffPolicy, GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher,
@@ -264,6 +265,13 @@ fn report(node: &str, verdict: &Verdict) -> bool {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|value| value == "sidecar") {
+        sidecar::serve().unwrap_or_else(|error| {
+            eprintln!("sidecar failed: {error}");
+            std::process::exit(1);
+        });
+        return;
+    }
     if args.get(1).is_some_and(|value| value == "validate") {
         let Some(ir_path) = arg(&args, "--ir") else {
             eprintln!("usage: foundry-host validate --ir <file>");

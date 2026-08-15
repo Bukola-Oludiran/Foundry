@@ -17,9 +17,12 @@ jobs:
           node-version: 26
           cache: npm
           cache-dependency-path: package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
+      - run: cargo build --manifest-path gr-host/Cargo.toml --locked
       - run: npm run typecheck
       - run: npm run test:mcp
+      - run: npm run test:sidecar
       - run: npm audit --audit-level=high
 
   rust:

@@ -109,3 +109,8 @@ The repo-local Codex plugin is in `plugins/foundry`. Its skills read their canon
 the MCP server so tool and prompt guidance remain aligned. `FOUNDRY_HOST_BIN` may override the
 default `gr-host/target/debug/foundry-host` binary path. Provider and publishing credentials remain
 environment-only; they are never accepted as tool arguments.
+
+MCP uses the host's versioned JSON-lines sidecar by default. The sidecar accepts only the seven
+declared operations, returns structured run/status/publication fields, and restarts on the next
+request after an unexpected exit. `FOUNDRY_HOST_TRANSPORT=direct` is available only as a
+development diagnostic fallback.

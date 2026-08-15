@@ -1,17 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createInterface } from "node:readline";
 import type { WorkspaceRegistry } from "./workspaces.ts";
 
 export interface CommandExecution {
   code: number;
   stdout: string;
   stderr: string;
+  state?: Record<string, unknown>;
 }
 
 export interface CommandRunner {
   run(args: string[], options?: { cwd?: string; signal?: AbortSignal }): Promise<CommandExecution>;
+  close?(): Promise<void>;
 }
 
 export interface FoundryResult {
@@ -43,6 +46,95 @@ export class SubprocessRunner implements CommandRunner {
   }
 }
 
+interface SidecarResponse {
+  protocol_version: number;
+  id: string;
+  result?: { exitCode: number; stdout: string; stderr: string; state: Record<string, unknown> };
+  error?: { code: string; message: string };
+}
+
+const SIDECAR_OPERATIONS = new Set(["validate", "architect", "build", "status", "cancel", "rearchitect", "publish"]);
+
+export class RustSidecarRunner implements CommandRunner {
+  private child: ChildProcessWithoutNullStreams | null = null;
+  private readonly pending = new Map<string, { resolve: (value: CommandExecution) => void; reject: (error: Error) => void }>();
+  private closing = false;
+
+  constructor(private readonly binary: string, private readonly sidecarArgs = ["sidecar"]) {}
+
+  private start(): ChildProcessWithoutNullStreams {
+    if (this.closing) throw new HostCommandError("SIDECAR_CLOSED", "Foundry sidecar is closed");
+    if (this.child && this.child.exitCode === null && !this.child.killed) return this.child;
+    const child = spawn(this.binary, this.sidecarArgs, { env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+    this.child = child;
+    createInterface({ input: child.stdout }).on("line", (line) => this.onLine(line));
+    child.stderr.on("data", (chunk: Buffer) => process.stderr.write(`[foundry-sidecar] ${chunk.toString("utf8")}`));
+    const unavailable = (message: string): void => {
+      if (this.child !== child) return;
+      this.child = null;
+      const error = new HostCommandError("SIDECAR_UNAVAILABLE", message);
+      for (const request of this.pending.values()) request.reject(error);
+      this.pending.clear();
+    };
+    child.once("error", (error) => unavailable(error.message));
+    child.once("exit", (code, signal) => unavailable(`Foundry sidecar exited (${code ?? signal ?? "unknown"})`));
+    return child;
+  }
+
+  private onLine(line: string): void {
+    let response: SidecarResponse;
+    try {
+      response = JSON.parse(line) as SidecarResponse;
+    } catch {
+      return;
+    }
+    const request = this.pending.get(response.id);
+    if (!request) return;
+    this.pending.delete(response.id);
+    if (response.protocol_version !== 1) request.reject(new HostCommandError("SIDECAR_PROTOCOL_ERROR", "Foundry sidecar returned an unsupported protocol version"));
+    else if (response.error) request.reject(new HostCommandError(response.error.code, response.error.message));
+    else if (!response.result) request.reject(new HostCommandError("SIDECAR_PROTOCOL_ERROR", "Foundry sidecar response has no result"));
+    else request.resolve({ code: response.result.exitCode, stdout: response.result.stdout, stderr: response.result.stderr, state: response.result.state });
+  }
+
+  run(args: string[], options: { cwd?: string; signal?: AbortSignal } = {}): Promise<CommandExecution> {
+    const [operation, ...parameters] = args;
+    if (!operation || !SIDECAR_OPERATIONS.has(operation)) return Promise.reject(new HostCommandError("INVALID_OPERATION", "Foundry sidecar operation is not allowed"));
+    if (!options.cwd) return Promise.reject(new HostCommandError("INVALID_CWD", "Foundry sidecar requires a working directory"));
+    if (options.signal?.aborted) return Promise.reject(options.signal.reason ?? new Error("operation aborted"));
+    const id = randomUUID();
+    const child = this.start();
+    return new Promise<CommandExecution>((resolveRequest, reject) => {
+      const abort = (): void => {
+        this.pending.delete(id);
+        reject(options.signal?.reason ?? new Error("operation aborted"));
+      };
+      options.signal?.addEventListener("abort", abort, { once: true });
+      this.pending.set(id, {
+        resolve: (value) => { options.signal?.removeEventListener("abort", abort); resolveRequest(value); },
+        reject: (error) => { options.signal?.removeEventListener("abort", abort); reject(error); },
+      });
+      const request = JSON.stringify({ protocol_version: 1, id, method: "execute", params: { operation, arguments: parameters, cwd: options.cwd } });
+      child.stdin.write(`${request}\n`, (error) => {
+        if (!error) return;
+        this.pending.delete(id);
+        options.signal?.removeEventListener("abort", abort);
+        reject(error);
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    this.closing = true;
+    const child = this.child;
+    if (!child) return;
+    await new Promise<void>((resolveExit) => {
+      child.once("exit", () => resolveExit());
+      child.stdin.end();
+    });
+  }
+}
+
 type CommonPath = { workspaceId: string };
 
 export class FoundryHostClient {
@@ -51,7 +143,12 @@ export class FoundryHostClient {
   static configured(workspaces: WorkspaceRegistry): FoundryHostClient {
     const binary = resolve(process.env.FOUNDRY_HOST_BIN ?? "gr-host/target/debug/foundry-host");
     if (!existsSync(binary)) throw new HostCommandError("HOST_NOT_BUILT", `Foundry host not found at ${binary}; run cargo build --manifest-path gr-host/Cargo.toml --locked`);
-    return new FoundryHostClient(workspaces, new SubprocessRunner(binary));
+    const runner = process.env.FOUNDRY_HOST_TRANSPORT === "direct" ? new SubprocessRunner(binary) : new RustSidecarRunner(binary);
+    return new FoundryHostClient(workspaces, runner);
+  }
+
+  async close(): Promise<void> {
+    await this.runner.close?.();
   }
 
   private async execute(args: string[], cwd: string, signal?: AbortSignal): Promise<FoundryResult> {
@@ -60,6 +157,7 @@ export class FoundryHostClient {
     try {
       execution = await this.runner.run(args, { cwd, signal });
     } catch (error) {
+      if (error instanceof HostCommandError) throw error;
       throw new HostCommandError("HOST_UNAVAILABLE", error instanceof Error ? error.message : String(error));
     }
     if (execution.code !== 0) throw new HostCommandError("HOST_COMMAND_FAILED", execution.stderr || execution.stdout || `Foundry exited with ${execution.code}`, { exitCode: execution.code });
@@ -67,7 +165,7 @@ export class FoundryHostClient {
     const status = execution.stdout.match(/^([^:\n]+):\s*([A-Za-z_]+)$/m);
     return {
       accepted: true,
-      state: { command: args[0], stdout: execution.stdout, ...(runId ? { runId } : {}), ...(status ? { runId: status[1], status: status[2].toLowerCase() } : {}) },
+      state: execution.state ?? { command: args[0], stdout: execution.stdout, ...(runId ? { runId } : {}), ...(status ? { runId: status[1], status: status[2].toLowerCase() } : {}) },
       diagnostics: [],
       provenance: { operationId, at: new Date().toISOString() },
     };

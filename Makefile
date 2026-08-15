@@ -18,8 +18,10 @@ lint:
 	npm run --prefix pi-pool typecheck
 
 test:
+	cargo build --manifest-path gr-host/Cargo.toml --locked
 	cargo test --manifest-path gr-host/Cargo.toml --workspace
 	npm run test:mcp
+	npm run test:sidecar
 	npm test --prefix pi-pool
 
 test-local:

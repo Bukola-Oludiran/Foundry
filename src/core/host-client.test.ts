@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { FoundryHostClient, type CommandExecution, type CommandRunner } from "./host-client.ts";
+import { join, resolve } from "node:path";
+import { FoundryHostClient, RustSidecarRunner, type CommandExecution, type CommandRunner } from "./host-client.ts";
 import { WorkspaceRegistry } from "./workspaces.ts";
 
 class RecordingRunner implements CommandRunner {
@@ -47,4 +47,15 @@ test("workspace paths reject traversal and symlink escape", async () => {
   writeFileSync(join(outside, "secret.json"), "{}");
   symlinkSync(outside, join(root, "linked"));
   assert.throws(() => client.validate({ workspaceId: "project", ir: "linked/secret.json" }), (error: any) => error.code === "SYMLINK_ESCAPE");
+});
+
+test("structured sidecar transport restarts after an unexpected child exit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "foundry-sidecar-client-"));
+  const runner = new RustSidecarRunner(process.execPath, [resolve("src/core/fake-sidecar.mjs")]);
+  const first = await runner.run(["status", "--run", "run-one"], { cwd: root });
+  assert.deepEqual(first.state, { command: "status", structured: true });
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+  const second = await runner.run(["validate", "--ir", "accepted.ir.json"], { cwd: root });
+  assert.deepEqual(second.state, { command: "validate", structured: true });
+  await runner.close();
 });

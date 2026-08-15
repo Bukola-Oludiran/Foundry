@@ -51,45 +51,45 @@ export function createFoundryMcpServer(client: FoundryHostClient): Server {
   const server = new Server({ name: "foundry", version: "0.1.0" }, { capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } }, instructions: FOUNDRY_SERVER_INSTRUCTIONS });
 
   server.setRequestHandler("tools/list", async () => ({ tools: TOOLS.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.schema as never, annotations: "annotations" in tool ? tool.annotations : { readOnlyHint: false, idempotentHint: false, openWorldHint: false } })) }));
-  server.setRequestHandler("tools/call", async (request) => {
+  server.setRequestHandler("tools/call", async (request, context) => {
     const input = (request.params.arguments ?? {}) as Record<string, unknown>;
     try {
       let result: FoundryResult;
       switch (request.params.name) {
         case "foundry_validate": {
           rejectUnknown(input, ["workspaceId", "ir"]);
-          result = await client.validate({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024) });
+          result = await client.validate({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024) }, context.mcpReq.signal);
           break;
         }
         case "foundry_architect": {
           rejectUnknown(input, ["workspaceId", "spec", "output", "base", "languages"]);
           const languages = input.languages;
           if (languages !== undefined && (!Array.isArray(languages) || languages.length === 0 || languages.length > 3 || new Set(languages).size !== languages.length || languages.some((language) => !["python", "typescript", "go"].includes(String(language))))) throw new HostCommandError("INVALID_ARGUMENT", "languages must contain unique supported language names");
-          result = await client.architect({ workspaceId: workspace(input), spec: stringArgument(input, "spec", 1024), output: stringArgument(input, "output", 1024), base: optionalString(input, "base"), languages: languages?.map(String) });
+          result = await client.architect({ workspaceId: workspace(input), spec: stringArgument(input, "spec", 1024), output: stringArgument(input, "output", 1024), base: optionalString(input, "base"), languages: languages?.map(String) }, context.mcpReq.signal);
           break;
         }
         case "foundry_build": {
           rejectUnknown(input, ["workspaceId", "ir", "durabilityDir", "base", "dryRun"]);
           if (input.dryRun !== undefined && typeof input.dryRun !== "boolean") throw new HostCommandError("INVALID_ARGUMENT", "dryRun must be a boolean");
-          result = await client.build({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024), durabilityDir: stringArgument(input, "durabilityDir", 1024), base: optionalString(input, "base"), dryRun: input.dryRun as boolean | undefined });
+          result = await client.build({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024), durabilityDir: stringArgument(input, "durabilityDir", 1024), base: optionalString(input, "base"), dryRun: input.dryRun as boolean | undefined }, context.mcpReq.signal);
           break;
         }
         case "foundry_status":
         case "foundry_cancel": {
           rejectUnknown(input, ["workspaceId", "runId", "durabilityDir"]);
           const parsed = { workspaceId: workspace(input), runId: stringArgument(input, "runId", 200), durabilityDir: stringArgument(input, "durabilityDir", 1024) };
-          result = request.params.name === "foundry_status" ? await client.status(parsed) : await client.cancel(parsed);
+          result = request.params.name === "foundry_status" ? await client.status(parsed, context.mcpReq.signal) : await client.cancel(parsed, context.mcpReq.signal);
           break;
         }
         case "foundry_rearchitect": {
           rejectUnknown(input, ["workspaceId", "ir", "proposal", "node", "reason", "output"]);
-          result = await client.rearchitect({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024), proposal: stringArgument(input, "proposal", 1024), node: stringArgument(input, "node", 200), reason: stringArgument(input, "reason", 2000), output: stringArgument(input, "output", 1024) });
+          result = await client.rearchitect({ workspaceId: workspace(input), ir: stringArgument(input, "ir", 1024), proposal: stringArgument(input, "proposal", 1024), node: stringArgument(input, "node", 200), reason: stringArgument(input, "reason", 2000), output: stringArgument(input, "output", 1024) }, context.mcpReq.signal);
           break;
         }
         case "foundry_publish": {
           rejectUnknown(input, ["workspaceId", "runId", "durabilityDir", "ir", "base", "summary", "draftPr"]);
           if (input.draftPr !== true) throw new HostCommandError("INVALID_ARGUMENT", "draftPr must be true; Foundry cannot publish a non-draft pull request");
-          result = await client.publish({ workspaceId: workspace(input), runId: stringArgument(input, "runId", 200), durabilityDir: stringArgument(input, "durabilityDir", 1024), ir: stringArgument(input, "ir", 1024), base: optionalString(input, "base"), summary: optionalString(input, "summary", 1024), draftPr: true });
+          result = await client.publish({ workspaceId: workspace(input), runId: stringArgument(input, "runId", 200), durabilityDir: stringArgument(input, "durabilityDir", 1024), ir: stringArgument(input, "ir", 1024), base: optionalString(input, "base"), summary: optionalString(input, "summary", 1024), draftPr: true }, context.mcpReq.signal);
           break;
         }
         default: throw new HostCommandError("TOOL_NOT_FOUND", `Unknown tool ${request.params.name}`);
