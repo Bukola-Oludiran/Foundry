@@ -28,7 +28,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::studio_room::{
-    ArchitectureOperationV1, ArchitectureRoomEventV1, ArchitectureRoomTranscriptV1, MAX_EVENT_PAGE,
+    verify_room_event_chain, ArchitectureOperationV1, ArchitectureRoomEventV1,
+    ArchitectureRoomTranscriptV1, MAX_EVENT_PAGE,
 };
 
 const FENCING_TOKEN: u64 = 1;
@@ -199,8 +200,27 @@ fn engine(root: &Path) -> Result<LocalPersistence, StudioError> {
 /// Opens, replays, and verifies the Studio durability store for readiness.
 pub fn verify_readiness(root: &Path) -> Result<(), StudioError> {
     let engine = engine(root)?;
-    block_on(engine.replay(0)).map_err(|source| error("SERVICE_NOT_READY", source.to_string()))?;
+    let records = block_on(engine.replay(0))
+        .map_err(|source| error("SERVICE_NOT_READY", source.to_string()))?;
     block_on(engine.verify()).map_err(|source| error("SERVICE_NOT_READY", source.to_string()))?;
+    let mut latest_states = BTreeMap::new();
+    for record in records {
+        if let RuntimeRecordV1::RunStatusChanged {
+            run_id,
+            result: Some(result),
+            ..
+        } = record
+        {
+            if let Ok(state) = serde_json::from_value::<StudioStateV1>(result) {
+                latest_states.insert(run_id.to_string(), state);
+            }
+        }
+    }
+    for state in latest_states.into_values() {
+        for reference in state.room_transcripts.values() {
+            verify_room_transcript_reference(&engine, reference)?;
+        }
+    }
     Ok(())
 }
 
@@ -392,6 +412,58 @@ pub fn persist_room_transcript(
         .insert(operation.operation_id.clone(), reference.clone());
     commit_state(&engine, &run_id, &state)?;
     Ok(reference)
+}
+
+fn verify_room_transcript_reference(
+    engine: &dyn PersistenceEngine,
+    reference: &ArchitectureRoomTranscriptRefV1,
+) -> Result<(), StudioError> {
+    let index: ArchitectureRoomTranscriptIndexV1 = read_json(engine, &reference.index_artifact_id)?;
+    if index.transcript_version != 1
+        || index.operation.operation_id != reference.operation_id
+        || index.operation.proposal_id.as_deref() != Some(reference.proposal_id.as_str())
+        || digest(&index.operation) != reference.operation_digest
+        || index.last_sequence != reference.last_sequence
+        || index.last_event_digest != reference.last_event_digest
+    {
+        return Err(error(
+            "SERVICE_NOT_READY",
+            "architecture room transcript index does not match Studio state",
+        ));
+    }
+    let mut events = Vec::with_capacity(index.event_count);
+    for page_ref in &index.pages {
+        let page: Vec<ArchitectureRoomEventV1> = read_json(engine, &page_ref.artifact_id)?;
+        let first = page.first().ok_or_else(|| {
+            error(
+                "SERVICE_NOT_READY",
+                "architecture room transcript contains an empty page",
+            )
+        })?;
+        let last = page.last().expect("verified non-empty transcript page");
+        if page.len() != page_ref.event_count
+            || first.sequence != page_ref.first_sequence
+            || last.sequence != page_ref.last_sequence
+            || last.event_digest != page_ref.last_event_digest
+        {
+            return Err(error(
+                "SERVICE_NOT_READY",
+                "architecture room transcript page metadata is corrupt",
+            ));
+        }
+        events.extend(page);
+    }
+    if events.len() != index.event_count
+        || events.last().map_or(0, |event| event.sequence) != index.last_sequence
+        || events.last().map(|event| event.event_digest.clone()) != index.last_event_digest
+    {
+        return Err(error(
+            "SERVICE_NOT_READY",
+            "architecture room transcript page set is incomplete",
+        ));
+    }
+    verify_room_event_chain(&index.operation, &events)
+        .map_err(|source| error("SERVICE_NOT_READY", source.to_string()))
 }
 
 fn default_layout() -> ArchitectureLayoutV1 {
@@ -1719,6 +1791,23 @@ mod tests {
         let page: Vec<ArchitectureRoomEventV1> =
             read_json(&persistence, &index.pages[0].artifact_id).unwrap();
         assert_eq!(page, transcript.events);
+        drop(persistence);
+        verify_readiness(&root).unwrap();
+
+        let persistence = engine(&root).unwrap();
+        let run_id = RunId::parse(state.run_id.clone()).unwrap();
+        let mut corrupt_state = load_state(&persistence, &run_id).unwrap();
+        corrupt_state
+            .room_transcripts
+            .get_mut(&operation.operation_id)
+            .unwrap()
+            .operation_digest = "corrupt".into();
+        commit_state(&persistence, &run_id, &corrupt_state).unwrap();
+        drop(persistence);
+        assert_eq!(
+            verify_readiness(&root).unwrap_err().code(),
+            "SERVICE_NOT_READY"
+        );
     }
 
     #[test]

@@ -27,6 +27,9 @@ Once a room is bound to a proposal, Foundry mirrors its hash-chained events into
 200-record GraphReact artifact pages. The Studio state references a transcript-index artifact only
 after every page is stored. Cursor and SSE reads perform this durable mirror before returning new
 events, so the visible conversation can be recovered alongside the architecture revision.
+Studio readiness verifies the referenced index, every artifact page, page boundaries, the complete
+monotonic sequence, and each event hash. A missing page or mismatched state pointer fails readiness
+instead of serving a partial transcript.
 
 ```sh
 export FOUNDRY_STUDIO_SERVICE_NSEC='<workload secret>'

@@ -992,14 +992,21 @@ fn read_record(path: &Path) -> Result<StoredArchitectureOperationV1, Architectur
 }
 
 fn verify_events(stored: &StoredArchitectureOperationV1) -> Result<(), ArchitectureRoomError> {
+    verify_room_event_chain(&stored.operation, &stored.events)
+}
+
+pub fn verify_room_event_chain(
+    operation: &ArchitectureOperationV1,
+    events: &[ArchitectureRoomEventV1],
+) -> Result<(), ArchitectureRoomError> {
     let mut previous: Option<&str> = None;
-    for (index, event) in stored.events.iter().enumerate() {
+    for (index, event) in events.iter().enumerate() {
         let expected_sequence = u64::try_from(index)
             .map_err(|error| ArchitectureRoomError::Storage(error.to_string()))?
             .saturating_add(1);
         if event.sequence != expected_sequence
             || event.previous_event_digest.as_deref() != previous
-            || event.operation_id != stored.operation.operation_id
+            || event.operation_id != operation.operation_id
         {
             return Err(ArchitectureRoomError::Storage(
                 "architecture room event chain is corrupt".into(),
@@ -1122,6 +1129,96 @@ mod tests {
                 .as_str()
                 .into()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_replacement_is_ignored_but_committed_event_tampering_fails_closed() {
+        let root = temporary_root();
+        let ledger = ArchitectureRoomLedger::open(&root).unwrap();
+        let (operation, _) = ledger
+            .create(
+                "30617:owner:repo",
+                "crash-boundary",
+                &serde_json::json!({"spec": "test"}),
+                ArchitectureOperationKindV1::InitialArchitecture,
+                "human",
+                1,
+                vec!["read".into()],
+                true,
+            )
+            .unwrap();
+        let record_path = root
+            .join("architecture-operations")
+            .join(format!("{}.json", operation.operation_id));
+        let interrupted_path = record_path.with_extension("interrupted.tmp");
+        fs::write(&interrupted_path, b"{\"torn\":").unwrap();
+        drop(ledger);
+
+        let reopened = ArchitectureRoomLedger::open(&root).unwrap();
+        assert_eq!(
+            reopened
+                .events(&operation.operation_id, 0, 200)
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(reopened);
+
+        let mut committed: Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        committed["events"][0]["message"] = Value::String("tampered".into());
+        fs::write(&record_path, serde_json::to_vec_pretty(&committed).unwrap()).unwrap();
+        let reopened = ArchitectureRoomLedger::open(&root).unwrap();
+        assert!(matches!(
+            reopened.events(&operation.operation_id, 0, 200),
+            Err(ArchitectureRoomError::Storage(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn room_event_pages_are_capped_and_cursor_continuation_has_no_gap() {
+        let root = temporary_root();
+        let ledger = ArchitectureRoomLedger::open(&root).unwrap();
+        let (operation, _) = ledger
+            .create(
+                "30617:owner:repo",
+                "paged-room",
+                &serde_json::json!({"spec": "test"}),
+                ArchitectureOperationKindV1::InitialArchitecture,
+                "human",
+                1,
+                vec!["read".into()],
+                true,
+            )
+            .unwrap();
+        let mut stored = ledger.read(&operation.operation_id).unwrap();
+        for index in 0..205 {
+            append_event_to(
+                &mut stored,
+                ArchitectureRoomActorKindV1::Foundry,
+                "foundry",
+                ArchitectureRoomPayloadV1::Message {
+                    message: format!("event {index}"),
+                },
+                None,
+            )
+            .unwrap();
+        }
+        replace_synced(&ledger.path(&operation.operation_id), &stored).unwrap();
+
+        let first = ledger
+            .events(&operation.operation_id, 0, usize::MAX)
+            .unwrap();
+        let second = ledger
+            .events(&operation.operation_id, 200, usize::MAX)
+            .unwrap();
+        assert_eq!(first.len(), MAX_EVENT_PAGE);
+        assert_eq!(first.last().unwrap().sequence, 200);
+        assert_eq!(second.len(), 6);
+        assert_eq!(second.first().unwrap().sequence, 201);
+        assert_eq!(second.last().unwrap().sequence, 206);
         fs::remove_dir_all(root).unwrap();
     }
 
