@@ -11,8 +11,18 @@ test("Codex plugin registers the workspace-scoped Foundry MCP server", () => {
   assert.equal(manifest.name, "foundry");
   assert.equal(manifest.author.name, "Bukola-Oludiran");
   assert.equal(manifest.mcpServers, "./.mcp.json");
-  assert.deepEqual(config.mcpServers.foundry.args, ["--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:stdio"]);
+  assert.deepEqual(config.mcpServers.foundry.args, ["--silent", "--prefix", "${PLUGIN_ROOT}/../..", "run", "mcp:stdio"]);
   assert.ok(config.mcpServers.foundry.env_vars.includes("FOUNDRY_WORKSPACE_ROOTS"));
+});
+
+test("Claude Code project configuration registers the same Foundry MCP server", () => {
+  const config = JSON.parse(readFileSync(resolve(".mcp.json"), "utf8"));
+  assert.deepEqual(config.mcpServers.foundry, {
+    type: "stdio",
+    command: "npm",
+    args: ["--silent", "--prefix", "${CLAUDE_PROJECT_DIR:-.}", "run", "mcp:claude"],
+  });
+  assert.equal(JSON.parse(readFileSync(resolve("package.json"), "utf8")).scripts["mcp:claude"], "node --import tsx src/mcp/claude-stdio.ts");
 });
 
 test("plugin skills cover every canonical workflow without duplicating its body", () => {

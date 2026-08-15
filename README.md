@@ -110,6 +110,11 @@ the MCP server so tool and prompt guidance remain aligned. `FOUNDRY_HOST_BIN` ma
 default `gr-host/target/debug/foundry-host` binary path. Provider and publishing credentials remain
 environment-only; they are never accepted as tool arguments.
 
+Claude Code discovers the checked-in project-scoped `.mcp.json`. Build the host and run
+`claude mcp get foundry`; the result should report a connected project server. First-use approval,
+workspace overrides, verification, and troubleshooting are documented in
+[`docs/claude-code.md`](docs/claude-code.md).
+
 MCP uses the host's versioned JSON-lines sidecar by default. The sidecar accepts only the seven
 declared operations, returns structured run/status/publication fields, and restarts on the next
 request after an unexpected exit. MCP request aborts are correlated to the active sidecar command

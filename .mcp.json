@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "foundry": {
+      "type": "stdio",
+      "command": "npm",
+      "args": ["--silent", "--prefix", "${CLAUDE_PROJECT_DIR:-.}", "run", "mcp:claude"]
+    }
+  }
+}

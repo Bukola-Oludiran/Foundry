@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test:mcp": "node --import tsx --test src/**/*.test.ts",
     "test:sidecar": "node --import tsx src/mcp/validate-sidecar.ts",
+    "mcp:claude": "node --import tsx src/mcp/claude-stdio.ts",
     "mcp:stdio": "node --import tsx src/mcp/stdio.ts"
   },
   "dependencies": {

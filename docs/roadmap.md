@@ -105,8 +105,10 @@ Status: first durable-host façade implemented; richer project authoring remains
 - Implemented: MCP abort signals use correlated sidecar cancellation messages to terminate the
   matching active host command. This transport cleanup is intentionally separate from durable run
   cancellation, which remains an explicit, monotonic GraphReact operation.
-- Remaining: Claude Code certification, richer architecture project resources, and the separately
-  versioned recursive product IR.
+- Implemented: checked-in Claude Code project discovery with a credential-free `.mcp.json`, a
+  protocol-clean launcher, configuration tests, and a native Claude Code connection health check.
+- Remaining: richer architecture project resources and the separately versioned recursive product
+  IR.
 
 ## Deferred
 
