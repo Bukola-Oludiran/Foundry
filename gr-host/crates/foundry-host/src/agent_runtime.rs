@@ -14,7 +14,10 @@ use serde_json::Value;
 
 const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(300);
+// The gateway owns per-turn liveness (300s silence, 600s absolute by
+// default). Poll long enough to observe and durably report that terminal
+// decision instead of racing it from the Foundry client.
+const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(660);
 
 /// Role assigned to one bounded model job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +34,11 @@ pub struct AgentJobRequestV1 {
     pub protocol_version: u32,
     pub job_id: String,
     pub run_id: String,
+    /// Stable proposal-scoped conversation. Runtimes that support persistent
+    /// sessions reuse it across bounded jobs; others rely on the committed
+    /// room transcript included in `input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     pub role: AgentRoleV1,
     pub operation: String,
     pub input: Value,
@@ -48,10 +56,16 @@ impl AgentJobRequestV1 {
             protocol_version: PROTOCOL_VERSION,
             job_id: job_id.into(),
             run_id: run_id.into(),
+            conversation_id: None,
             role,
             operation: operation.into(),
             input,
         }
+    }
+
+    pub fn with_conversation_id(mut self, conversation_id: Option<&str>) -> Self {
+        self.conversation_id = conversation_id.map(str::to_owned);
+        self
     }
 }
 

@@ -21,7 +21,7 @@ use futures::executor::block_on;
 use graphreact_durable_runtime::store_artifact;
 use graphreact_persistence::{
     canonical_json_bytes, ArtifactId, AttemptId, DeploymentDigest, DeploymentId, LocalConfig,
-    LocalPersistence, PersistenceEngine, RunId, RunStatus, RuntimeRecordV1,
+    LocalPersistence, PersistenceEngine, PersistenceError, RunId, RunStatus, RuntimeRecordV1,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
@@ -35,6 +35,8 @@ use crate::studio_room::{
 const FENCING_TOKEN: u64 = 1;
 const ENTRYPOINT: &str = "foundry-architecture-studio";
 const DEPLOYMENT_BYTES: &[u8] = b"foundry-architecture-studio-v1";
+const LOCAL_LOCK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+const LOCAL_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevisionArtifactsV1 {
@@ -189,12 +191,17 @@ fn engine(root: &Path) -> Result<LocalPersistence, StudioError> {
             .and_then(|()| file.sync_all())
             .map_err(|e| error("SERVICE_NOT_READY", e.to_string()))?;
     }
-    LocalPersistence::open(LocalConfig::new(
-        root,
-        deployment_id(root)?,
-        deployment_digest,
-    ))
-    .map_err(|e| error("SERVICE_NOT_READY", e.to_string()))
+    let config = LocalConfig::new(root, deployment_id(root)?, deployment_digest);
+    let deadline = std::time::Instant::now() + LOCAL_LOCK_RETRY_LIMIT;
+    loop {
+        match LocalPersistence::open(config.clone()) {
+            Ok(engine) => return Ok(engine),
+            Err(PersistenceError::Locked(_)) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(LOCAL_LOCK_RETRY_INTERVAL);
+            }
+            Err(source) => return Err(error("SERVICE_NOT_READY", source.to_string())),
+        }
+    }
 }
 
 /// Opens, replays, and verifies the Studio durability store for readiness.
@@ -1586,6 +1593,21 @@ mod tests {
             base_commit: "b".repeat(40),
             target_branch: "main".into(),
         }
+    }
+
+    #[test]
+    fn local_engine_waits_for_an_overlapping_service_operation() {
+        let (root, _) = fixture();
+        let held_engine = engine(&root).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held_engine);
+        });
+
+        let reopened = engine(&root).unwrap();
+        release.join().unwrap();
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -109,6 +109,13 @@ cargo run -p foundry-host -- studio-serve \
 The architect and critic agent IDs must differ. Foundry rejects startup when both roles resolve to
 the same runtime identity.
 
+Each Architecture Room supplies a stable proposal conversation ID. Buzz reuses a separate ACP
+session for the architect and critic across compiler and review-repair turns, giving both roles
+multi-turn continuity without weakening critic independence. Their exchange is mediated through
+Foundry's committed room transcript: critic verdicts, compiler diagnostics, architect responses,
+and human guidance become bounded context for the next applicable turn. If Buzz restarts, Foundry
+reconstructs that context from the durable transcript rather than depending on provider memory.
+
 The gateway contract is versioned and job-oriented:
 
 - `POST /v1/acp/jobs` submits `AgentJobRequestV1`. Reusing the same `job_id` and request returns the

@@ -10,7 +10,11 @@ use sha2::{Digest, Sha256};
 use crate::agent_runtime::{AgentJobRequestV1, AgentRoleV1, AgentRuntime};
 use crate::http::http_post_json;
 
-const MAX_ARCHITECT_ATTEMPTS: u32 = 3;
+// Compiler repair is deliberately separate from the three architect/critic
+// collaboration rounds in Studio. A complex but otherwise sound ownership
+// tree often needs more than one mechanical compiler correction before it is
+// ready for independent review.
+const MAX_COMPILER_REPAIR_ATTEMPTS: u32 = 5;
 const IR_SCHEMA: &str = include_str!("../../../../ir/schema.json");
 
 pub trait ArchitectureAgent {
@@ -33,6 +37,7 @@ pub struct WorkerArchitectureAgent<'a> {
 pub struct RuntimeArchitectureAgent<'a> {
     pub runtime: &'a dyn AgentRuntime,
     pub run_id: &'a str,
+    pub conversation_id: Option<&'a str>,
     pub event_sink: Option<&'a (dyn Fn(Value) + Send + Sync)>,
 }
 
@@ -72,7 +77,8 @@ impl ArchitectureAgent for RuntimeArchitectureAgent<'_> {
                 "proposal_schema": serde_json::from_str::<Value>(IR_SCHEMA)
                     .map_err(|error| format!("embedded IR schema is invalid: {error}"))?,
             }),
-        );
+        )
+        .with_conversation_id(self.conversation_id);
         let response = match self.event_sink {
             Some(event_sink) => self.runtime.execute_with_events(&job, event_sink),
             None => self.runtime.execute(&job),
@@ -180,8 +186,9 @@ pub fn architect(
             .join("\n"));
     }
     let mut diagnostics = Vec::new();
-    for attempt in 1..=MAX_ARCHITECT_ATTEMPTS {
-        let (proposal, rationale) = agent.propose(request, attempt, &diagnostics)?;
+    let mut current_request = request.clone();
+    for attempt in 1..=MAX_COMPILER_REPAIR_ATTEMPTS {
+        let (proposal, rationale) = agent.propose(&current_request, attempt, &diagnostics)?;
         match serde_json::from_value::<Ir>(proposal) {
             Ok(ir) => {
                 let disallowed: Vec<_> = ir
@@ -200,6 +207,7 @@ pub fn architect(
                     .collect();
                 if !disallowed.is_empty() {
                     diagnostics = disallowed;
+                    current_request = compiler_repair_request(request, &ir, attempt);
                     agent.report_diagnostics(attempt, &diagnostics);
                     continue;
                 }
@@ -220,6 +228,7 @@ pub fn architect(
                     }
                     Err(errors) => {
                         diagnostics = errors.into_iter().map(|error| error.to_string()).collect();
+                        current_request = compiler_repair_request(request, &ir, attempt);
                         agent.report_diagnostics(attempt, &diagnostics);
                     }
                 }
@@ -231,9 +240,22 @@ pub fn architect(
         }
     }
     Err(format!(
-        "architecture remained invalid after {MAX_ARCHITECT_ATTEMPTS} attempts:\n{}",
+        "architecture remained invalid after {MAX_COMPILER_REPAIR_ATTEMPTS} attempts:\n{}",
         diagnostics.join("\n")
     ))
+}
+
+fn compiler_repair_request(
+    original: &ArchitectureRequest,
+    previous_candidate: &Ir,
+    attempt: u32,
+) -> ArchitectureRequest {
+    let mut request = original.clone();
+    request.existing_ir = Some(previous_candidate.clone());
+    request.policy_constraints.push(format!(
+        "Compiler repair continuity: this is repair attempt {attempt}. Treat existing_ir as the previous candidate, preserve all unaffected nodes, interfaces, acceptance mandates, and write scopes, and make the smallest complete-IR change that resolves every supplied diagnostic. Do not regenerate the architecture from scratch."
+    ));
+    request
 }
 
 pub fn revise(
@@ -279,8 +301,9 @@ pub fn revise(
         existing_ir: Some(accepted.clone()),
     };
     let mut diagnostics = Vec::new();
-    for attempt in 1..=MAX_ARCHITECT_ATTEMPTS {
-        let (proposal, rationale) = agent.propose(&request, attempt, &diagnostics)?;
+    let mut current_request = request.clone();
+    for attempt in 1..=MAX_COMPILER_REPAIR_ATTEMPTS {
+        let (proposal, rationale) = agent.propose(&current_request, attempt, &diagnostics)?;
         let proposed: Ir = match serde_json::from_value(proposal) {
             Ok(ir) => ir,
             Err(error) => {
@@ -310,11 +333,12 @@ pub fn revise(
             }
             Err(errors) => {
                 diagnostics = errors.into_iter().map(|error| error.to_string()).collect();
+                current_request = compiler_repair_request(&request, &proposed, attempt);
             }
         }
     }
     Err(format!(
-        "revision remained invalid after {MAX_ARCHITECT_ATTEMPTS} attempts:\n{}",
+        "revision remained invalid after {MAX_COMPILER_REPAIR_ATTEMPTS} attempts:\n{}",
         diagnostics.join("\n")
     ))
 }
@@ -327,15 +351,20 @@ mod tests {
 
     struct RepairingAgent {
         proposals: Mutex<Vec<Value>>,
+        saw_previous_candidate: Mutex<Vec<bool>>,
     }
 
     impl ArchitectureAgent for RepairingAgent {
         fn propose(
             &self,
-            _request: &ArchitectureRequest,
+            request: &ArchitectureRequest,
             _attempt: u32,
             diagnostics: &[String],
         ) -> Result<(Value, String), String> {
+            self.saw_previous_candidate
+                .lock()
+                .map_err(|e| e.to_string())?
+                .push(request.existing_ir.is_some());
             let mut proposals = self.proposals.lock().map_err(|e| e.to_string())?;
             if proposals.len() == 1 && diagnostics.is_empty() {
                 return Err("repair loop failed to feed diagnostics back".into());
@@ -351,6 +380,7 @@ mod tests {
         let valid: Value = serde_json::from_slice(&std::fs::read(example).unwrap()).unwrap();
         let agent = RepairingAgent {
             proposals: Mutex::new(vec![json!({"ir_version": 99}), valid]),
+            saw_previous_candidate: Mutex::new(Vec::new()),
         };
         let request = ArchitectureRequest {
             architecture_version: 1,
@@ -366,6 +396,49 @@ mod tests {
         let built = architect(&agent, &request, &output).unwrap();
         assert_eq!(built.ir_version, 1);
         assert!(output.is_file());
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(output.with_extension("json.rationale.md"));
+    }
+
+    #[test]
+    fn compiler_repair_receives_the_previous_candidate() {
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../ir/examples/string-utils.ir.json");
+        let valid: Ir = serde_json::from_slice(&std::fs::read(example).unwrap()).unwrap();
+        let mut invalid = valid.clone();
+        invalid
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "trim")
+            .unwrap()
+            .owner = Some("lowercase".into());
+        let agent = RepairingAgent {
+            proposals: Mutex::new(vec![
+                serde_json::to_value(invalid).unwrap(),
+                serde_json::to_value(valid).unwrap(),
+            ]),
+            saw_previous_candidate: Mutex::new(Vec::new()),
+        };
+        let request = ArchitectureRequest {
+            architecture_version: 1,
+            product_spec: "string utilities".into(),
+            repository: ".".into(),
+            base_revision: "HEAD".into(),
+            allowed_languages: vec!["python".into()],
+            policy_constraints: Vec::new(),
+            existing_ir: None,
+        };
+        let output = std::env::temp_dir().join(format!(
+            "foundry-architecture-continuity-{}.json",
+            std::process::id()
+        ));
+
+        architect(&agent, &request, &output).unwrap();
+
+        assert_eq!(
+            *agent.saw_previous_candidate.lock().unwrap(),
+            vec![false, true]
+        );
         let _ = std::fs::remove_file(&output);
         let _ = std::fs::remove_file(output.with_extension("json.rationale.md"));
     }
@@ -417,6 +490,7 @@ mod tests {
                 serde_json::to_value(invalid).unwrap(),
                 serde_json::to_value(valid).unwrap(),
             ]),
+            saw_previous_candidate: Mutex::new(Vec::new()),
         };
         let output =
             std::env::temp_dir().join(format!("foundry-revision-{}.json", std::process::id()));

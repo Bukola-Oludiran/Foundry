@@ -1342,12 +1342,15 @@ async fn execute_room_critic(
         "studio-critic-{:x}",
         sha2::Sha256::digest(format!("{run_id}:{}", snapshot.revision.semantic_digest))
     );
+    let conversation_history =
+        architecture_room_conversation_context(&state.durability_dir, room_operation_id)?;
     let critic_payload = json!({
         "job_id": &critic_job_id,
         "ir": &snapshot.ir,
         "semantic_digest": &snapshot.revision.semantic_digest,
         "rationale": &snapshot.rationale,
         "locks": &snapshot.locks,
+        "conversation_history": conversation_history,
     });
     let critic_room_operation = room_operation_id.map(str::to_owned);
     let critic_room_durability = state.durability_dir.clone();
@@ -1360,7 +1363,8 @@ async fn execute_room_critic(
             AgentRoleV1::Critic,
             "architecture_review",
             critic_payload,
-        );
+        )
+        .with_conversation_id(critic_room_operation.as_deref());
         let event_sink = |event: Value| {
             if let Some(operation_id) = &critic_room_operation {
                 project_agent_runtime_event(
@@ -1406,6 +1410,91 @@ async fn execute_room_critic(
         .map(str::to_owned)
         .collect();
     Ok((verdict, diagnostics))
+}
+
+const MAX_ARCHITECT_CONVERSATION_CONTEXT_CHARS: usize = 48 * 1024;
+
+fn architecture_room_conversation_context(
+    durability_dir: &std::path::Path,
+    operation_id: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let Some(operation_id) = operation_id else {
+        return Ok(None);
+    };
+    let transcript = ArchitectureRoomLedger::open(durability_dir)?.transcript(operation_id)?;
+    let mut lines = transcript
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            let actor = match event.actor_kind {
+                ArchitectureRoomActorKindV1::Human => "Human",
+                ArchitectureRoomActorKindV1::Architect => "Architect",
+                ArchitectureRoomActorKindV1::Critic => "Critic",
+                ArchitectureRoomActorKindV1::Compiler => "Compiler",
+                ArchitectureRoomActorKindV1::Foundry => "Foundry",
+            };
+            let body = match event.payload {
+                ArchitectureRoomPayloadV1::Message { message } => message,
+                ArchitectureRoomPayloadV1::Plan { summary } => {
+                    format!("Plan: {summary}")
+                }
+                ArchitectureRoomPayloadV1::CompilerDiagnostics { diagnostics } => {
+                    format!("Compiler diagnostics: {}", diagnostics.join(" | "))
+                }
+                ArchitectureRoomPayloadV1::Question {
+                    question_id,
+                    prompt,
+                } => format!("Question {question_id}: {prompt}"),
+                ArchitectureRoomPayloadV1::HumanGuidance {
+                    mode,
+                    delivery,
+                    content,
+                    ..
+                } => format!("Guidance ({mode:?}, {delivery:?}): {content}"),
+                ArchitectureRoomPayloadV1::CriticVerdict {
+                    verdict,
+                    diagnostics,
+                } => format!("Verdict {verdict}: {}", diagnostics.join(" | ")),
+                ArchitectureRoomPayloadV1::Revision {
+                    revision_id,
+                    semantic_digest,
+                } => format!("Revision {revision_id} committed as {semantic_digest}"),
+                ArchitectureRoomPayloadV1::Lifecycle { .. }
+                | ArchitectureRoomPayloadV1::Tool { .. }
+                | ArchitectureRoomPayloadV1::Terminal { .. } => return None,
+            };
+            Some(format!(
+                "#{sequence} {actor} ({actor_id}): {body}",
+                sequence = event.sequence,
+                actor_id = event.actor_id,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    // Keep the newest committed conversation when the bounded context window
+    // fills. The original product specification and current IR are supplied
+    // separately, so dropping old duplicate narration cannot remove either
+    // authoritative input.
+    let mut retained_chars = 0usize;
+    let mut retained = Vec::new();
+    while let Some(line) = lines.pop() {
+        let remaining = MAX_ARCHITECT_CONVERSATION_CONTEXT_CHARS.saturating_sub(retained_chars);
+        if remaining == 0 {
+            break;
+        }
+        let bounded = line.chars().take(remaining).collect::<String>();
+        retained_chars = retained_chars.saturating_add(bounded.chars().count());
+        retained.push(bounded);
+    }
+    retained.reverse();
+    if retained.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "Durable Architecture Room conversation history (oldest retained event first):\n{}",
+            retained.join("\n")
+        )))
+    }
 }
 
 async fn create_studio(
@@ -1614,6 +1703,7 @@ async fn run_architect_studio(
             let agent = crate::architect::RuntimeArchitectureAgent {
                 runtime: architect_runtime.as_ref(),
                 run_id: &architect_run_id,
+                conversation_id: room_operation.as_deref(),
                 event_sink: room_operation
                     .as_ref()
                     .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
@@ -1772,6 +1862,11 @@ async fn run_architect_studio(
             "Preserve existing external interfaces unless the diagnostic requires a compatible correction".into(),
             "Return the complete strict Foundry IR v1 document".into(),
         ];
+        if let Some(conversation) =
+            architecture_room_conversation_context(&state.durability_dir, room_operation_id)?
+        {
+            repair_constraints.push(conversation);
+        }
         repair_constraints.extend(
             checkpoint_guidance
                 .into_iter()
@@ -1812,6 +1907,7 @@ async fn run_architect_studio(
             let agent = crate::architect::RuntimeArchitectureAgent {
                 runtime: repair_runtime.as_ref(),
                 run_id: &repair_run_id,
+                conversation_id: repair_room_operation.as_deref(),
                 event_sink: repair_room_operation
                     .as_ref()
                     .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
@@ -2579,6 +2675,15 @@ async fn cancel_architecture_operation(
     let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
     let operation = ledger.get(&operation_id)?;
     capability(&state, &headers, &operation.repository_coordinate, "edit")?;
+    if operation.state.terminal() {
+        return Ok(Json(serde_json::to_value(operation).map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERVICE_NOT_READY",
+                error.to_string(),
+            )
+        })?));
+    }
     let cancelled = ledger.transition(
         &operation_id,
         ArchitectureOperationStateV1::Cancelled,
@@ -3069,6 +3174,7 @@ async fn run_generate_revision(
         let agent = crate::architect::RuntimeArchitectureAgent {
             runtime: architect_runtime.as_ref(),
             run_id: &architect_run_id,
+            conversation_id: room_operation.as_deref(),
             event_sink: room_operation
                 .as_ref()
                 .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
@@ -3198,6 +3304,11 @@ async fn run_generate_revision(
             "Keep changes inside the selected proposal subtree and return complete strict IR v1"
                 .into(),
         ];
+        if let Some(conversation) =
+            architecture_room_conversation_context(&state.durability_dir, room_operation_id)?
+        {
+            policy_constraints.push(conversation);
+        }
         policy_constraints.extend(
             checkpoint_guidance
                 .into_iter()
@@ -3240,6 +3351,7 @@ async fn run_generate_revision(
             let agent = crate::architect::RuntimeArchitectureAgent {
                 runtime: repair_runtime.as_ref(),
                 run_id: &repair_run_id,
+                conversation_id: repair_room_operation.as_deref(),
                 event_sink: repair_room_operation
                     .as_ref()
                     .map(|_| &event_sink as &(dyn Fn(Value) + Send + Sync)),
@@ -4142,6 +4254,56 @@ mod tests {
             .unwrap(),
         );
         headers
+    }
+
+    #[test]
+    fn architect_conversation_context_contains_critic_and_human_history() {
+        let durability = std::env::temp_dir().join(format!("studio-conversation-{}", RunId::new()));
+        let ledger = ArchitectureRoomLedger::open(&durability).unwrap();
+        let (operation, _) = ledger
+            .create(
+                "repo",
+                "operation",
+                &json!({"spec": "test"}),
+                ArchitectureOperationKindV1::InitialArchitecture,
+                "human-1",
+                1,
+                vec!["edit".into()],
+                true,
+            )
+            .unwrap();
+        ledger
+            .append_event(
+                &operation.operation_id,
+                ArchitectureRoomActorKindV1::Critic,
+                "critic-1",
+                ArchitectureRoomPayloadV1::CriticVerdict {
+                    verdict: "changes_requested".into(),
+                    diagnostics: vec!["Move the shared provider to its consumer LCA".into()],
+                },
+            )
+            .unwrap();
+        ledger
+            .submit_guidance(
+                &operation.operation_id,
+                "message-1",
+                GuidanceModeV1::Checkpoint,
+                GuidanceDeliveryV1::Checkpointed,
+                "Keep the public interface unchanged",
+                "human-1",
+            )
+            .unwrap();
+
+        let context =
+            architecture_room_conversation_context(&durability, Some(&operation.operation_id))
+                .unwrap()
+                .unwrap();
+
+        assert!(context.contains("Critic (critic-1)"));
+        assert!(context.contains("Move the shared provider to its consumer LCA"));
+        assert!(context.contains("Human (human-1)"));
+        assert!(context.contains("Keep the public interface unchanged"));
+        let _ = std::fs::remove_dir_all(durability);
     }
 
     #[test]

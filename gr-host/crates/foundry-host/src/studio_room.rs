@@ -141,8 +141,6 @@ pub struct ArchitectureRoomEventV1 {
     pub studio_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision_id: Option<String>,
     pub actor_kind: ArchitectureRoomActorKindV1,
     pub actor_id: String,
     pub created_at_ms: u64,
@@ -869,7 +867,6 @@ fn append_event_to(
         operation_id: stored.operation.operation_id.clone(),
         studio_run_id: stored.operation.studio_run_id.clone(),
         proposal_id: stored.operation.proposal_id.clone(),
-        revision_id: None,
         actor_kind,
         actor_id: actor_id.to_owned(),
         created_at_ms,
@@ -1089,6 +1086,31 @@ mod tests {
 
     fn temporary_root() -> PathBuf {
         std::env::temp_dir().join(format!("foundry-room-test-{}", RunId::new()))
+    }
+
+    #[test]
+    fn revision_payload_round_trips_without_a_flattened_field_collision() {
+        let encoded = serde_json::json!({
+            "protocol_version": 1,
+            "event_id": "event-one",
+            "sequence": 1,
+            "operation_id": "operation-one",
+            "studio_run_id": "run-one",
+            "proposal_id": "proposal-one",
+            "actor_kind": "foundry",
+            "actor_id": "foundry",
+            "created_at_ms": 1,
+            "event_digest": "digest-one",
+            "kind": "revision",
+            "revision_id": "revision-one",
+            "semantic_digest": "semantic-one"
+        });
+        let event: ArchitectureRoomEventV1 = serde_json::from_value(encoded).unwrap();
+        assert!(matches!(
+            event.payload,
+            ArchitectureRoomPayloadV1::Revision { revision_id, .. }
+                if revision_id == "revision-one"
+        ));
     }
 
     #[test]
