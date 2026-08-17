@@ -2,6 +2,31 @@
 
 Architecture Studio runs as the supervised Foundry service for one Buzz community:
 
+## Managed-agent monitoring sessions
+
+`POST /v1/studio/agent-session` is the narrow exchange for NIP-OA-managed Buzz agents. The request
+must carry a fresh NIP-98 signature from the agent and its existing `X-Buzz-Auth-Tag` owner
+attestation. Foundry verifies both signatures, checks attestation conditions against kind 27235,
+loads the current signed repository announcement, and derives authority from the human owner's
+target-branch role.
+
+The five-minute capability is bound to the service audience, community, repository, target branch,
+agent identity, and requested operation set. It can contain `read` and, only when the owner can edit
+the protected branch, `architect`. `architect` is accepted solely by initial architecture creation;
+guidance, answers, cancellation, semantic commands, critique, approval, and build routes retain
+their stronger human scopes. Agent sessions are always `human: false` and never count toward an
+approval threshold.
+
+An agent architecture request may omit `binding.base_commit`. Foundry resolves the configured
+repository mount's exact target-branch revision before durably creating the operation. The resolved
+commit—not the moving branch name—is stored as the operation base. Missing mounts and unresolvable
+branches fail closed.
+
+Buzz stores only a self-encrypted monitor cursor and thread destination. Foundry capabilities,
+NIP-OA tags, keys, and service URLs are memory-only and are refreshed through signed exchange. A
+monitor stopping or going offline never cancels the Architecture Room operation; event recovery
+continues from Foundry's committed sequence.
+
 ## Durable Architecture Room
 
 Buzz submits creation through `POST /v1/studio-operations/architect`. Foundry returns the operation

@@ -20,6 +20,7 @@ pub struct StudioBindingV1 {
     pub studio_version: u32,
     pub community_id: String,
     pub repository_coordinate: String,
+    #[serde(default)]
     pub base_commit: String,
     pub target_branch: String,
 }

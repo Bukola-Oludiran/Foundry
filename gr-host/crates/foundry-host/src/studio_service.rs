@@ -9,6 +9,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,11 @@ use foundry_ir::{
     RationaleEntryV1, StudioBindingV1, StudioCommandV1, StudioOperationV1, StudioRationaleV1,
 };
 use graphreact_persistence::RunId;
+use nostr::hashes::{sha256, Hash};
+use nostr::secp256k1::schnorr::Signature;
+use nostr::secp256k1::Message;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
+use nostr::{PublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -77,11 +82,18 @@ struct Policy {
 struct Capability {
     community_id: String,
     repository_coordinate: String,
+    target_branch: String,
     actor_pubkey: String,
     operations: BTreeSet<String>,
     expires_at: u64,
     human: bool,
     approval_threshold: usize,
+}
+
+#[derive(Debug)]
+struct VerifiedAgent {
+    agent_pubkey: String,
+    owner_pubkey: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +187,17 @@ struct SessionRequest {
     target_branch: String,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSessionRequest {
+    protocol_version: u32,
+    community_id: String,
+    repository_coordinate: String,
+    #[serde(default = "default_target_branch")]
+    target_branch: String,
+    requested_operations: BTreeSet<String>,
+}
+
 fn default_target_branch() -> String {
     "main".into()
 }
@@ -186,6 +209,9 @@ struct SessionResponse {
     expires_at: u64,
     audience: String,
     actor_pubkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_owner_pubkey: Option<String>,
+    human: bool,
     operations: BTreeSet<String>,
 }
 
@@ -477,6 +503,47 @@ fn capability(
     Ok(capability)
 }
 
+fn capability_any(
+    state: &ServiceState,
+    headers: &HeaderMap,
+    repository: &str,
+    operations: &[&str],
+) -> Result<Capability, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            ApiError::new(StatusCode::UNAUTHORIZED, "FORBIDDEN", "missing capability")
+        })?;
+    let mut sessions = state.sessions.lock().map_err(|error| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_NOT_READY",
+            error.to_string(),
+        )
+    })?;
+    sessions.retain(|_, session| session.expires_at > epoch_seconds());
+    sessions
+        .get(token)
+        .filter(|session| {
+            session.community_id == state.community_id
+                && session.repository_coordinate == repository
+                && session.expires_at > epoch_seconds()
+                && operations
+                    .iter()
+                    .any(|operation| session.operations.contains(*operation))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+                "capability scope denied",
+            )
+        })
+}
+
 fn operations_for(policy: &Policy, actor: &str, repository_coordinate: &str) -> BTreeSet<String> {
     let mut operations = BTreeSet::new();
     let repository_owner = repository_coordinate.split(':').nth(1);
@@ -655,11 +722,12 @@ fn apply_signed_repository_policy(
     }
 }
 
-fn verify_nip98(
+fn verify_nip98_for(
     state: &ServiceState,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<String, ApiError> {
+    path: &str,
+) -> Result<(String, u64), ApiError> {
     let encoded = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -724,7 +792,7 @@ fn verify_nip98(
                 .flatten()
         })
     };
-    let expected_url = format!("{}/v1/studio/session", state.public_url);
+    let expected_url = format!("{}{}", state.public_url, path);
     if tag("u") != Some(expected_url.as_str()) || tag("method") != Some("POST") {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -759,7 +827,7 @@ fn verify_nip98(
             "NIP-98 replay rejected",
         ));
     }
-    event_json
+    let actor = event_json
         .get("pubkey")
         .and_then(Value::as_str)
         .map(str::to_owned)
@@ -769,7 +837,164 @@ fn verify_nip98(
                 "FORBIDDEN",
                 "missing actor pubkey",
             )
-        })
+        })?;
+    Ok((actor, created_at))
+}
+
+fn verify_nip98(
+    state: &ServiceState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<String, ApiError> {
+    verify_nip98_for(state, headers, body, "/v1/studio/session").map(|(actor, _)| actor)
+}
+
+fn validate_agent_attestation_conditions(
+    conditions: &str,
+    created_at: u64,
+) -> Result<(), ApiError> {
+    if conditions.is_empty() {
+        return Ok(());
+    }
+    for clause in conditions.split('&') {
+        let canonical = |value: &str| {
+            !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && (value == "0" || !value.starts_with('0'))
+        };
+        let permitted = if let Some(value) = clause.strip_prefix("kind=") {
+            canonical(value) && value.parse::<u16>().ok() == Some(27_235)
+        } else if let Some(value) = clause.strip_prefix("created_at<") {
+            canonical(value)
+                && value
+                    .parse::<u32>()
+                    .is_ok_and(|bound| created_at < u64::from(bound))
+        } else if let Some(value) = clause.strip_prefix("created_at>") {
+            canonical(value)
+                && value
+                    .parse::<u32>()
+                    .is_ok_and(|bound| created_at > u64::from(bound))
+        } else {
+            false
+        };
+        if !permitted {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "FORBIDDEN",
+                "NIP-OA conditions do not authorize this request",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_agent_attestation(
+    headers: &HeaderMap,
+    agent_hex: &str,
+    created_at: u64,
+) -> Result<VerifiedAgent, ApiError> {
+    let encoded = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "FORBIDDEN",
+                "managed agent NIP-OA attestation required",
+            )
+        })?;
+    let values: Vec<Value> = serde_json::from_str(encoded).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA attestation",
+        )
+    })?;
+    if values.len() != 4 || values.first().and_then(Value::as_str) != Some("auth") {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA attestation",
+        ));
+    }
+    let owner_hex = values[1].as_str().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA owner",
+        )
+    })?;
+    let conditions = values[2].as_str().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA conditions",
+        )
+    })?;
+    let signature = values[3].as_str().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA signature",
+        )
+    })?;
+    if owner_hex.len() != 64
+        || agent_hex.len() != 64
+        || owner_hex != owner_hex.to_ascii_lowercase()
+        || agent_hex != agent_hex.to_ascii_lowercase()
+        || owner_hex == agent_hex
+    {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA identity",
+        ));
+    }
+    validate_agent_attestation_conditions(conditions, created_at)?;
+    let owner = PublicKey::from_hex(owner_hex).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA owner",
+        )
+    })?;
+    let agent = PublicKey::from_hex(agent_hex).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid agent identity",
+        )
+    })?;
+    let signature = Signature::from_str(signature).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA signature",
+        )
+    })?;
+    let preimage = format!("nostr:agent-auth:{}:{conditions}", agent.to_hex());
+    let digest = sha256::Hash::hash(preimage.as_bytes());
+    let message = Message::from_digest(digest.to_byte_array());
+    let xonly = owner.xonly().map_err(|_| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "FORBIDDEN",
+            "invalid NIP-OA owner",
+        )
+    })?;
+    SECP256K1
+        .verify_schnorr(&signature, &message, &xonly)
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "FORBIDDEN",
+                "invalid NIP-OA signature",
+            )
+        })?;
+    Ok(VerifiedAgent {
+        agent_pubkey: agent.to_hex(),
+        owner_pubkey: owner.to_hex(),
+    })
 }
 
 fn service_nip98_header(
@@ -1165,6 +1390,13 @@ async fn exchange_session(
     body: axum::body::Bytes,
 ) -> Result<Json<SessionResponse>, ApiError> {
     let actor = verify_nip98(&state, &headers, &body)?;
+    if headers.contains_key("x-auth-tag") || state.policy.agents.contains(&actor) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "managed agents must use the narrow agent-session exchange",
+        ));
+    }
     let request: SessionRequest = serde_json::from_slice(&body).map_err(|error| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -1211,10 +1443,11 @@ async fn exchange_session(
             Capability {
                 community_id: request.community_id,
                 repository_coordinate: request.repository_coordinate,
+                target_branch: request.target_branch,
                 actor_pubkey: actor.clone(),
                 operations: operations.clone(),
                 expires_at,
-                human: !state.policy.agents.contains(&actor),
+                human: true,
                 approval_threshold: signed_policy
                     .approval_threshold
                     .max(state.policy.approval_threshold),
@@ -1226,6 +1459,112 @@ async fn exchange_session(
         expires_at,
         audience: state.service_pubkey.clone(),
         actor_pubkey: actor,
+        effective_owner_pubkey: None,
+        human: true,
+        operations,
+    }))
+}
+
+async fn exchange_agent_session(
+    State(state): State<Arc<ServiceState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<SessionResponse>, ApiError> {
+    let (actor, created_at) =
+        verify_nip98_for(&state, &headers, &body, "/v1/studio/agent-session")?;
+    let agent = verify_agent_attestation(&headers, &actor, created_at)?;
+    let request: AgentSessionRequest = serde_json::from_slice(&body).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMMAND",
+            error.to_string(),
+        )
+    })?;
+    if request.protocol_version != 1 || request.community_id != state.community_id {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "community scope denied",
+        ));
+    }
+    if request.requested_operations.is_empty()
+        || request
+            .requested_operations
+            .iter()
+            .any(|operation| !matches!(operation.as_str(), "read" | "architect"))
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "agent sessions permit only read and architect operations",
+        ));
+    }
+    let signed_policy = signed_repository_policy(
+        &state,
+        &request.repository_coordinate,
+        &request.target_branch,
+    )
+    .await?;
+    let owner_can_edit = agent.owner_pubkey == signed_policy.owner
+        || signed_policy.editors.contains(&agent.owner_pubkey)
+        || state.policy.editors.contains(&agent.owner_pubkey);
+    // Resolving a current signed announcement grants the same read scope as
+    // the human exchange. Architect remains bound to the owner's branch role.
+    let owner_can_read = true;
+    let mut entitled = BTreeSet::new();
+    if owner_can_read {
+        entitled.insert("read".to_owned());
+    }
+    if owner_can_edit {
+        entitled.insert("architect".to_owned());
+    }
+    let operations = request
+        .requested_operations
+        .intersection(&entitled)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if operations != request.requested_operations {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "agent owner lacks the requested repository role",
+        ));
+    }
+    let token = RunId::new().to_string();
+    let expires_at = epoch_seconds().saturating_add(SESSION_TTL_SECONDS);
+    state
+        .sessions
+        .lock()
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_NOT_READY",
+                error.to_string(),
+            )
+        })?
+        .insert(
+            token.clone(),
+            Capability {
+                community_id: request.community_id,
+                repository_coordinate: request.repository_coordinate,
+                target_branch: request.target_branch,
+                actor_pubkey: agent.agent_pubkey.clone(),
+                operations: operations.clone(),
+                expires_at,
+                human: false,
+                approval_threshold: signed_policy
+                    .approval_threshold
+                    .max(state.policy.approval_threshold),
+            },
+        );
+    Ok(Json(SessionResponse {
+        protocol_version: 1,
+        capability: token,
+        expires_at,
+        audience: state.service_pubkey.clone(),
+        actor_pubkey: agent.agent_pubkey,
+        effective_owner_pubkey: Some(agent.owner_pubkey),
+        human: false,
         operations,
     }))
 }
@@ -1515,6 +1854,15 @@ async fn create_studio(
             "community scope denied",
         ));
     }
+    if !capability.target_branch.is_empty()
+        && capability.target_branch != request.binding.target_branch
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "capability target branch denied",
+        ));
+    }
     let signed_policy = signed_repository_policy(
         &state,
         &request.binding.repository_coordinate,
@@ -1552,13 +1900,44 @@ async fn create_studio(
 async fn architect_studio(
     State(state): State<Arc<ServiceState>>,
     headers: HeaderMap,
-    Json(request): Json<ArchitectStudioRequest>,
+    Json(mut request): Json<ArchitectStudioRequest>,
 ) -> Result<Json<StudioProjection>, ApiError> {
     let capability = authorize_architect_request(&state, &headers, &request).await?;
+    resolve_architect_base(&state, &mut request)?;
     let operation = operation_key(&headers)?.to_owned();
     run_architect_studio(state, capability, request, operation, None)
         .await
         .map(Json)
+}
+
+fn resolve_architect_base(
+    state: &ServiceState,
+    request: &mut ArchitectStudioRequest,
+) -> Result<(), ApiError> {
+    if !request.binding.base_commit.trim().is_empty() {
+        return Ok(());
+    }
+    let repository = state
+        .repository_paths
+        .get(&request.binding.repository_coordinate)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_NOT_READY",
+                "repository is not mounted by this Foundry service",
+            )
+        })?;
+    request.binding.base_commit =
+        crate::repository::git_revision(repository, &request.binding.target_branch).map_err(
+            |error| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "STALE_BASE",
+                    format!("target branch could not be resolved: {error}"),
+                )
+            },
+        )?;
+    Ok(())
 }
 
 async fn authorize_architect_request(
@@ -1566,17 +1945,26 @@ async fn authorize_architect_request(
     headers: &HeaderMap,
     request: &ArchitectStudioRequest,
 ) -> Result<Capability, ApiError> {
-    let mut capability = capability(
+    let mut capability = capability_any(
         state,
         headers,
         &request.binding.repository_coordinate,
-        "edit",
+        &["edit", "architect"],
     )?;
     if request.binding.community_id != state.community_id {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
             "community scope denied",
+        ));
+    }
+    if !capability.target_branch.is_empty()
+        && capability.target_branch != request.binding.target_branch
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "capability target branch denied",
         ));
     }
     let signed_policy = signed_repository_policy(
@@ -1973,9 +2361,10 @@ async fn run_architect_studio(
 async fn submit_architecture_operation(
     State(state): State<Arc<ServiceState>>,
     headers: HeaderMap,
-    Json(request): Json<ArchitectStudioRequest>,
+    Json(mut request): Json<ArchitectStudioRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let capability = authorize_architect_request(&state, &headers, &request).await?;
+    resolve_architect_base(&state, &mut request)?;
     let idempotency_key = operation_key(&headers)?.to_owned();
     let request_value = serde_json::to_value(&request).map_err(|error| {
         ApiError::new(
@@ -2800,11 +3189,17 @@ async fn stream_architecture_room_events(
 ) -> Result<Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
     let ledger = ArchitectureRoomLedger::open(&state.durability_dir)?;
     let operation = ledger.get(&operation_id)?;
-    capability(&state, &headers, &operation.repository_coordinate, "read")?;
+    let capability = capability(&state, &headers, &operation.repository_coordinate, "read")?;
     let stream = futures::stream::unfold(
-        (state, operation_id, query.after, false),
-        |(state, operation_id, cursor, finished)| async move {
-            if finished {
+        (
+            state,
+            operation_id,
+            query.after,
+            capability.expires_at,
+            false,
+        ),
+        |(state, operation_id, cursor, expires_at, finished)| async move {
+            if finished || epoch_seconds() >= expires_at {
                 return None;
             }
             let ledger = match ArchitectureRoomLedger::open(&state.durability_dir) {
@@ -2816,7 +3211,7 @@ async fn stream_architecture_room_events(
                             json!({"code": "SERVICE_NOT_READY", "message": error.to_string()}),
                         )
                         .unwrap_or_else(|_| SseEvent::default().event("foundry-architecture-room"));
-                    return Some((Ok(event), (state, operation_id, cursor, true)));
+                    return Some((Ok(event), (state, operation_id, cursor, expires_at, true)));
                 }
             };
             let events = ledger.events(&operation_id, cursor, 1).unwrap_or_default();
@@ -2829,7 +3224,7 @@ async fn stream_architecture_room_events(
                             "message": error.body.message,
                         }))
                         .unwrap_or_else(|_| SseEvent::default().event("foundry-architecture-room"));
-                    return Some((Ok(event), (state, operation_id, cursor, true)));
+                    return Some((Ok(event), (state, operation_id, cursor, expires_at, true)));
                 }
                 let next_cursor = room_event.sequence;
                 let terminal = ledger
@@ -2847,13 +3242,19 @@ async fn stream_architecture_room_events(
                     .unwrap_or_else(|_| SseEvent::default().event("foundry-architecture-room"));
                 return Some((
                     Ok(event),
-                    (state, operation_id, next_cursor, terminal && no_more),
+                    (
+                        state,
+                        operation_id,
+                        next_cursor,
+                        expires_at,
+                        terminal && no_more,
+                    ),
                 ));
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             Some((
                 Ok(SseEvent::default().comment("waiting")),
-                (state, operation_id, cursor, false),
+                (state, operation_id, cursor, expires_at, false),
             ))
         },
     );
@@ -4015,6 +4416,7 @@ pub fn serve(args: &[String]) -> Result<(), String> {
     let router = Router::new()
         .route("/v1/studio/readiness", get(readiness))
         .route("/v1/studio/session", post(exchange_session))
+        .route("/v1/studio/agent-session", post(exchange_agent_session))
         .route("/v1/studios", post(create_studio))
         .route("/v1/studios/architect", post(architect_studio))
         .route(
@@ -4111,6 +4513,7 @@ pub fn serve(args: &[String]) -> Result<(), String> {
             let capability = Capability {
                 community_id: state.community_id.clone(),
                 repository_coordinate: recovered.operation.repository_coordinate.clone(),
+                target_branch: String::new(),
                 actor_pubkey: recovered.operation.actor_id.clone(),
                 operations: recovered
                     .operation
@@ -4254,6 +4657,86 @@ mod tests {
             .unwrap(),
         );
         headers
+    }
+
+    fn agent_attestation(owner: &Keys, agent: &Keys, conditions: &str) -> String {
+        let preimage = format!(
+            "nostr:agent-auth:{}:{conditions}",
+            agent.public_key().to_hex()
+        );
+        let digest = sha256::Hash::hash(preimage.as_bytes());
+        let message = Message::from_digest(digest.to_byte_array());
+        json!([
+            "auth",
+            owner.public_key().to_hex(),
+            conditions,
+            owner.sign_schnorr(&message).to_string(),
+        ])
+        .to_string()
+    }
+
+    #[test]
+    fn agent_attestation_resolves_owner_and_enforces_request_conditions() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let created_at = epoch_seconds();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-auth-tag",
+            agent_attestation(&owner, &agent, "kind=27235")
+                .parse()
+                .unwrap(),
+        );
+
+        let verified =
+            verify_agent_attestation(&headers, &agent.public_key().to_hex(), created_at).unwrap();
+        assert_eq!(verified.agent_pubkey, agent.public_key().to_hex());
+        assert_eq!(verified.owner_pubkey, owner.public_key().to_hex());
+
+        headers.insert(
+            "x-auth-tag",
+            agent_attestation(&owner, &agent, "kind=9").parse().unwrap(),
+        );
+        assert!(
+            verify_agent_attestation(&headers, &agent.public_key().to_hex(), created_at,).is_err()
+        );
+
+        headers.insert(
+            "x-auth-tag",
+            agent_attestation(&owner, &agent, "kind=027235")
+                .parse()
+                .unwrap(),
+        );
+        assert!(
+            verify_agent_attestation(&headers, &agent.public_key().to_hex(), created_at,).is_err()
+        );
+    }
+
+    #[test]
+    fn architect_capability_cannot_be_used_as_broad_edit_authority() {
+        let state = state();
+        let token = "agent-capability".to_owned();
+        state.sessions.lock().unwrap().insert(
+            token.clone(),
+            Capability {
+                community_id: state.community_id.clone(),
+                repository_coordinate: "30617:owner:repo".into(),
+                target_branch: "main".into(),
+                actor_pubkey: "agent".into(),
+                operations: BTreeSet::from(["architect".into(), "read".into()]),
+                expires_at: epoch_seconds() + 60,
+                human: false,
+                approval_threshold: 1,
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+        assert!(
+            capability_any(&state, &headers, "30617:owner:repo", &["edit", "architect"],).is_ok()
+        );
+        assert!(capability(&state, &headers, "30617:owner:repo", "edit",).is_err());
+        assert!(capability(&state, &headers, "30617:owner:repo", "approve",).is_err());
     }
 
     #[test]
