@@ -7,6 +7,7 @@ import {
 import { resolve } from "node:path";
 import {
   validateApplyMigrationsRequest,
+  validateCollectEnvironmentEvidenceRequest,
   validateEnvironmentActionRequest,
   validateStartEnvironmentRequest,
 } from "../validation.ts";
@@ -105,6 +106,16 @@ createServer(async (request, response) => {
         response,
         200,
         controller.snapshot(validateEnvironmentActionRequest(raw)),
+      );
+    }
+    if (request.url === "/v1/environments/evidence") {
+      return send(
+        response,
+        200,
+        await controller.evidence(
+          validateCollectEnvironmentEvidenceRequest(raw),
+          signal,
+        ),
       );
     }
     if (request.url === "/v1/environments/teardown") {

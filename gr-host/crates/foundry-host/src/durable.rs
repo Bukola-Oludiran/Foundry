@@ -52,6 +52,7 @@ pub struct DurableEnvironmentEvidence {
     pub migrations: Option<Value>,
     pub migrations_required: bool,
     pub snapshot: Value,
+    pub test_evidence: Value,
     pub teardown: Value,
 }
 
@@ -84,6 +85,10 @@ fn durable_build_outcome(
             migrations_required,
             snapshot: values
                 .and_then(|values| values.get("environment_snapshot"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            test_evidence: values
+                .and_then(|values| values.get("environment_test_evidence"))
                 .cloned()
                 .unwrap_or(Value::Null),
             teardown: values
@@ -146,6 +151,7 @@ impl DurableEffectAdapter for WorkerEffectAdapter {
                 "environment_health" => "/v2/environments/health",
                 "environment_migrations" => "/v2/environments/migrations",
                 "environment_snapshot" => "/v2/environments/snapshot",
+                "environment_evidence" => "/v2/environments/evidence",
                 "environment_teardown" => "/v2/environments/teardown",
                 other => {
                     return Err(EffectAdapterError::Operation {
@@ -279,6 +285,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
         let environment_health = use_durable_state("environment_health", Value::Null);
         let migration_result = use_durable_state("migration_result", Value::Null);
         let environment_snapshot = use_durable_state("environment_snapshot", Value::Null);
+        let environment_test_evidence = use_durable_state("environment_test_evidence", Value::Null);
         let environment_teardown = use_durable_state("environment_teardown", Value::Null);
         let effect = use_durable_effect();
         let artifact = use_durable_artifact();
@@ -536,12 +543,71 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
             phase.set(json!("ready"));
         });
 
+        let evidence_effect = effect.clone();
+        let evidence_plan = plan.clone();
+        use_message("collect_evidence", move |message| {
+            if phase.get().as_str() != Some("ready") {
+                return;
+            }
+            let handle = environment_handle.get();
+            let environment_plan = evidence_plan
+                .environment_start_request
+                .as_ref()
+                .and_then(|request| request.get("plan"));
+            let input = json!({
+                "protocol_version": 2,
+                "run_id": message.run_id,
+                "environment_id": handle.get("environment_id"),
+                "plan_digest": handle.get("plan_digest"),
+                "expectations": environment_plan.and_then(|plan| plan.get("integration_expectations")).cloned().unwrap_or_else(|| json!([])),
+                "resources": environment_plan.and_then(|plan| plan.get("resources")).and_then(Value::as_array).map(|resources| resources.iter().filter_map(|resource| resource.get("resource_id").cloned()).collect::<Vec<_>>()).unwrap_or_default(),
+            });
+            match evidence_effect(DurableEffectRequest {
+                key: "environment-test-evidence".into(),
+                adapter: "foundry-worker".into(),
+                operation: "environment_evidence".into(),
+                input,
+                result_type: "environment_evidence_result".into(),
+                error_type: "environment_evidence_error".into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!("collecting_evidence")),
+                Err(error) => {
+                    failure
+                        .set(json!({"phase": "environment_evidence", "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+        let test_evidence_artifact = artifact.clone();
+        use_message("environment_evidence_result", move |message| {
+            if message.payload.get("green").and_then(Value::as_bool) != Some(true) {
+                failure.set(message.payload.clone());
+                phase.set(json!("failed"));
+                return;
+            }
+            if let Err(error) = test_evidence_artifact(DurableArtifactRequest {
+                logical_name: "environment-test-evidence.json".into(),
+                media_type: "application/vnd.foundry.environment-test-evidence.v2+json".into(),
+                bytes: serde_json::to_vec(&message.payload).unwrap_or_default(),
+            }) {
+                failure.set(
+                    json!({"phase": "environment_evidence_artifact", "error": error.to_string()}),
+                );
+                phase.set(json!("failed"));
+                return;
+            }
+            environment_test_evidence.set(message.payload.clone());
+            phase.set(json!("evidence_collected"));
+        });
+
         for message_type in [
             "dependency_error",
             "environment_start_error",
             "environment_health_error",
             "environment_migrations_error",
             "environment_snapshot_error",
+            "environment_evidence_error",
         ] {
             use_message(message_type, move |message| {
                 failure.set(message.payload.clone());
@@ -559,7 +625,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
             let Some(current) = current.as_str() else {
                 return;
             };
-            if !matches!(current, "ready" | "failed") {
+            if !matches!(current, "ready" | "evidence_collected" | "failed") {
                 return;
             }
             let handle = environment_handle.get();
@@ -1391,6 +1457,30 @@ pub fn run(
         {
             if let Some(current) = preflight_phase.as_deref() {
                 if current == "ready" {
+                    let has_environment = state
+                        .nodes
+                        .get(V2_PREFLIGHT_NODE)
+                        .and_then(|values| values.get("environment_handle"))
+                        .is_some_and(|handle| !handle.is_null());
+                    enqueue_durable_message(
+                        &scheduler,
+                        engine.as_ref(),
+                        FENCING_TOKEN,
+                        V2_PREFLIGHT_NODE,
+                        if has_environment {
+                            "collect_evidence"
+                        } else {
+                            "teardown"
+                        },
+                        Value::Null,
+                        run.run_id.clone(),
+                        run.attempt_id.clone(),
+                        CorrelationId::new(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    continue;
+                }
+                if current == "evidence_collected" {
                     enqueue_durable_message(
                         &scheduler,
                         engine.as_ref(),

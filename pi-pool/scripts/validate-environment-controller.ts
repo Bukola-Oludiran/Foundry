@@ -39,6 +39,37 @@ class FakeDocker implements ProcessRunner {
       return result(1);
     }
     if (args[0] === "ps") return result(0, "");
+    if (args[0] === "exec" && args.includes("--eval")) {
+      return result(
+        0,
+        JSON.stringify({
+          integration_id: "payments",
+          unexpected_requests: 0,
+          contracts: [
+            {
+              node: "api",
+              integration_id: "payments",
+              operation: "create-payment",
+              request_sha256: digest("a"),
+              response_sha256: digest("b"),
+              observed_count: 1,
+              matched: true,
+              diagnostic: null,
+            },
+          ],
+        }),
+      );
+    }
+    if (args[0] === "stats") {
+      return result(
+        0,
+        JSON.stringify({
+          CPUPerc: "0.25%",
+          MemUsage: "12MiB / 1GiB",
+          PIDs: "4",
+        }) + "\n",
+      );
+    }
     return result(0, "ok\n");
   }
 }
@@ -94,6 +125,15 @@ const request: StartEnvironmentRequestV2 = {
         owner_node: "api",
         migration_path: "migrations",
         require_repeatable: true,
+      },
+    ],
+    integration_expectations: [
+      {
+        node: "api",
+        integration_id: "payments",
+        operation: "create-payment",
+        request: { amount: 1000 },
+        response: { status: "accepted" },
       },
     ],
   },
@@ -199,6 +239,21 @@ try {
   check(
     /^[a-f0-9]{64}$/.test(snapshot.snapshot_digest),
     "creates content-addressed snapshot evidence",
+  );
+  const evidence = await restarted.evidence({
+    protocol_version: 2,
+    job_id: "run:environment:evidence",
+    run_id: request.run_id,
+    environment_id: handle.environment_id,
+    plan_digest: request.plan.plan_digest,
+    expectations: request.plan.integration_expectations,
+    resources: request.plan.resources.map((resource) => resource.resource_id),
+  });
+  check(
+    evidence.green &&
+      evidence.contracts[0]?.observed_count === 1 &&
+      evidence.resource_usage[0]?.memory_bytes === 12 * 1024 * 1024,
+    "collects post-test contract and resource-usage evidence",
   );
   const teardown = await restarted.teardown({
     protocol_version: 2,

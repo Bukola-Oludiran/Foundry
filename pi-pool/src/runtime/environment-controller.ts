@@ -12,11 +12,13 @@ import {
 import { join, relative, resolve } from "node:path";
 import type {
   ApplyMigrationsRequestV2,
+  CollectEnvironmentEvidenceRequestV2,
   ContentArtifact,
   EnvironmentActionRequestV2,
   EnvironmentHandleV2,
   EnvironmentHealthV2,
   EnvironmentSnapshotV2,
+  EnvironmentTestEvidenceV2,
   EnvironmentTeardownV2,
   MigrationOutcomeV2,
   StartEnvironmentRequestV2,
@@ -177,6 +179,12 @@ export class DockerEnvironmentController {
           FOUNDRY_INTEGRATION_KIND: integration.kind,
           FOUNDRY_INTEGRATION_OPERATIONS: JSON.stringify(
             integration.operations,
+          ),
+          FOUNDRY_INTEGRATION_EXPECTATIONS: JSON.stringify(
+            request.plan.integration_expectations.filter(
+              (expectation) =>
+                expectation.integration_id === integration.integration_id,
+            ),
           ),
         },
         ["serve", "--integration", integration.integration_id],
@@ -357,6 +365,96 @@ export class DockerEnvironmentController {
     };
   }
 
+  async evidence(
+    request: CollectEnvironmentEvidenceRequestV2,
+    signal?: AbortSignal,
+  ): Promise<EnvironmentTestEvidenceV2> {
+    const state = this.require(request);
+    const contracts: EnvironmentTestEvidenceV2["contracts"] = [];
+    let unexpectedRequests = 0;
+    for (const container of state.containers.filter((candidate) =>
+      candidate.kind.startsWith("integration:"),
+    )) {
+      const result = await this.run(
+        [
+          "exec",
+          container.name,
+          "node",
+          "--input-type=module",
+          "--eval",
+          "const r=await fetch('http://127.0.0.1:8080/__foundry/evidence');if(!r.ok)process.exit(2);process.stdout.write(await r.text())",
+        ],
+        30_000,
+        undefined,
+        signal,
+      );
+      if (result.code !== 0)
+        throw new Error("integration evidence unavailable");
+      const value = JSON.parse(result.stdout) as {
+        contracts?: EnvironmentTestEvidenceV2["contracts"];
+        unexpected_requests?: number;
+      };
+      if (!Array.isArray(value.contracts)) {
+        throw new Error("integration evidence is malformed");
+      }
+      contracts.push(...value.contracts);
+      unexpectedRequests += value.unexpected_requests ?? 0;
+    }
+    const resourceContainers = state.containers.filter(
+      (candidate) => !candidate.kind.startsWith("integration:"),
+    );
+    const usage: EnvironmentTestEvidenceV2["resource_usage"] = [];
+    if (resourceContainers.length > 0) {
+      const stats = await this.run(
+        [
+          "stats",
+          "--no-stream",
+          "--format",
+          "{{json .}}",
+          ...resourceContainers.map((container) => container.name),
+        ],
+        30_000,
+        undefined,
+        signal,
+      );
+      if (stats.code !== 0) throw new Error("resource usage unavailable");
+      const lines = stats.stdout.trim().split("\n").filter(Boolean);
+      if (lines.length !== resourceContainers.length) {
+        throw new Error("resource usage coverage is incomplete");
+      }
+      for (const [index, line] of lines.entries()) {
+        const value = JSON.parse(line) as {
+          CPUPerc?: string;
+          MemUsage?: string;
+          PIDs?: string;
+        };
+        usage.push({
+          resource_id: resourceContainers[index]!.id,
+          cpu_percent: this.percentage(value.CPUPerc),
+          memory_bytes: this.memoryBytes(value.MemUsage),
+          pids: this.integer(value.PIDs),
+        });
+      }
+    }
+    contracts.sort((left, right) =>
+      `${left.integration_id}\0${left.operation}\0${left.node}`.localeCompare(
+        `${right.integration_id}\0${right.operation}\0${right.node}`,
+      ),
+    );
+    const payload = {
+      environment_id: state.environment_id,
+      run_id: state.run_id,
+      plan_digest: state.plan_digest,
+      green:
+        unexpectedRequests === 0 &&
+        contracts.every((contract) => contract.matched),
+      contracts,
+      unexpected_requests: unexpectedRequests,
+      resource_usage: usage,
+    };
+    return { ...payload, artifact: this.artifact("test-evidence", payload) };
+  }
+
   async teardown(
     request: EnvironmentActionRequestV2,
     signal?: AbortSignal,
@@ -522,6 +620,36 @@ export class DockerEnvironmentController {
     if (kind === "s3") return ["server", "/data", "--address", ":9000"];
     if (kind === "oidc") return ["start-dev", "--http-port=8080"];
     return [];
+  }
+
+  private percentage(value: string | undefined): number {
+    const parsed = Number(value?.replace("%", ""));
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100_000) {
+      throw new Error("resource CPU measurement is invalid");
+    }
+    return parsed;
+  }
+
+  private integer(value: string | undefined): number {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+      throw new Error("resource process measurement is invalid");
+    }
+    return parsed;
+  }
+
+  private memoryBytes(value: string | undefined): number {
+    const used = value?.split("/")[0]?.trim() ?? "";
+    const match = used.match(/^(\d+(?:\.\d+)?)\s*(B|KiB|MiB|GiB)$/);
+    if (!match) throw new Error("resource memory measurement is invalid");
+    const scale = { B: 1, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3 }[
+      match[2]!
+    ];
+    const bytes = Math.round(Number(match[1]) * scale!);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) {
+      throw new Error("resource memory measurement is invalid");
+    }
+    return bytes;
   }
 
   private resourceTmpfs(kind: string): string[] {

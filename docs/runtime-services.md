@@ -52,6 +52,15 @@ requires repeatability. Health, migration, snapshot, and teardown evidence is co
 Restarting the controller adopts the credential-free environment record. Teardown is idempotent and
 checks that no labeled container remains.
 
+After all node acceptance suites are green, the durable scheduler runs a separate evidence phase
+before teardown. Each emulator reports only plan-bound operation identities, canonical request and
+response hashes, bounded observation counts, and safe diagnostics. The controller also samples
+bounded CPU, memory, and PID usage for every declared resource container. Missing expectations,
+unexpected request shapes, response-hash drift, incomplete resource coverage, or unsafe evidence
+fails the build. The verified result is committed as a GraphReact artifact and materialized with
+the lifecycle record in `.foundry/resources/evidence.json`; credential values and raw provider
+payloads are never included.
+
 ## Project-runner boundary
 
 The project runner creates a fresh language-toolchain container for every test. The container has a

@@ -252,9 +252,13 @@ Status: foundation and worker execution boundaries implemented; durable build or
   resolver. The authenticated services use bounded strict protocol-v2 requests; runtime workloads
   are isolated on exact internal networks, and supply-chain artifacts are independently verified
   before promotion.
-- Remaining: contract-test/resource-usage evidence linkage and the broad polyglot restart
-  acceptance fixture, including live-Docker controller/emulator coverage and operator catalog
-  generation. Buzz now has
+- Implemented durable post-test contract and resource-usage evidence. Exact IR v2 expectations are
+  served by deterministic emulators, canonical request/response hashes and observation counts are
+  verified against the accepted plan, and every declared resource contributes bounded CPU, memory,
+  and PID measurements before teardown. Missing, unexpected, mismatched, unsafe, or incomplete
+  evidence fails closed and the verified projection is retained with lifecycle evidence.
+- Remaining: the broad polyglot restart acceptance fixture, including live-Docker
+  controller/emulator coverage and operator catalog generation. Buzz now has
   typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
   expectation mutation forms plus dedicated managed-resource and third-party integration graph
   projections. IR v1 never projects ordinary dependencies into those views.

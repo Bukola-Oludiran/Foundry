@@ -32,6 +32,7 @@ import {
   validateBuildRequest,
   validateArchitectureRequest,
   validateApplyMigrationsRequest,
+  validateCollectEnvironmentEvidenceRequest,
   validateEnvironmentActionRequest,
   validateResolveDependenciesRequest,
   validateStartEnvironmentRequest,
@@ -50,6 +51,7 @@ import {
   verifyEnvironmentHandle,
   verifyEnvironmentHealth,
   verifyEnvironmentSnapshot,
+  verifyEnvironmentTestEvidence,
   verifyEnvironmentTeardown,
   verifyMigrationResult,
 } from "./environment-manager.ts";
@@ -492,6 +494,33 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
             raw,
             async (signal) =>
               verifyMigrationResult(body, await manager.migrate(body, signal)),
+          ),
+        );
+      }
+      if (req.method === "POST" && req.url === "/v2/environments/evidence") {
+        const raw = await readJson(req, maxBodyBytes);
+        const body = validateCollectEnvironmentEvidenceRequest(raw);
+        const manager = opts.environmentManager;
+        if (!manager) {
+          throw new RequestError(
+            503,
+            "ENVIRONMENT_MANAGER_NOT_CONFIGURED",
+            "an isolated environment manager is not configured",
+            true,
+          );
+        }
+        return send(
+          res,
+          200,
+          await once(
+            "environments:evidence",
+            body.job_id,
+            raw,
+            async (signal) =>
+              verifyEnvironmentTestEvidence(
+                body,
+                await manager.evidence(body, signal),
+              ),
           ),
         );
       }

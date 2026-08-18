@@ -1,9 +1,11 @@
 import type {
   ApplyMigrationsRequestV2,
+  CollectEnvironmentEvidenceRequestV2,
   EnvironmentActionRequestV2,
   EnvironmentHandleV2,
   StartEnvironmentRequestV2,
 } from "../src/contract.ts";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,12 +14,14 @@ import {
   verifyEnvironmentHandle,
   verifyEnvironmentHealth,
   verifyEnvironmentSnapshot,
+  verifyEnvironmentTestEvidence,
   verifyEnvironmentTeardown,
   verifyMigrationResult,
 } from "../src/environment-manager.ts";
 import {
   RequestError,
   validateApplyMigrationsRequest,
+  validateCollectEnvironmentEvidenceRequest,
   validateEnvironmentActionRequest,
   validateStartEnvironmentRequest,
 } from "../src/validation.ts";
@@ -70,6 +74,15 @@ const start: StartEnvironmentRequestV2 = {
         require_repeatable: true,
       },
     ],
+    integration_expectations: [
+      {
+        node: "api",
+        integration_id: "payments",
+        operation: "create-payment",
+        request: { amount: 1000 },
+        response: { status: "accepted" },
+      },
+    ],
   },
   resource_images: {
     postgresql: `docker.io/library/postgres@sha256:${digest("d")}`,
@@ -98,6 +111,14 @@ const migrationRequest: ApplyMigrationsRequestV2 = {
   workspace,
   migrations: start.plan.migrations,
 };
+const evidenceRequest: CollectEnvironmentEvidenceRequestV2 = {
+  ...action,
+  job_id: "run-1:environment:evidence",
+  expectations: start.plan.integration_expectations,
+  resources: ["primary-db"],
+};
+const jsonDigest = (value: unknown) =>
+  createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 let failures = 0;
 function accept(label: string, operation: () => unknown): void {
@@ -186,6 +207,74 @@ accept("accepts complete repeatability evidence", () =>
       media_type: "application/json",
     },
   }),
+);
+accept("accepts exact contract and resource-usage evidence", () => {
+  validateCollectEnvironmentEvidenceRequest(evidenceRequest);
+  verifyEnvironmentTestEvidence(evidenceRequest, {
+    environment_id: action.environment_id,
+    run_id: action.run_id,
+    plan_digest: action.plan_digest,
+    green: true,
+    contracts: [
+      {
+        node: "api",
+        integration_id: "payments",
+        operation: "create-payment",
+        request_sha256: jsonDigest({ amount: 1000 }),
+        response_sha256: jsonDigest({ status: "accepted" }),
+        observed_count: 1,
+        matched: true,
+        diagnostic: null,
+      },
+    ],
+    unexpected_requests: 0,
+    resource_usage: [
+      {
+        resource_id: "primary-db",
+        cpu_percent: 0.2,
+        memory_bytes: 1024,
+        pids: 2,
+      },
+    ],
+    artifact: { sha256: digest("9"), size: 12, media_type: "application/json" },
+  });
+});
+reject(
+  "rejects mismatched contract response evidence",
+  "ENVIRONMENT_EVIDENCE_INVALID",
+  () =>
+    verifyEnvironmentTestEvidence(evidenceRequest, {
+      environment_id: action.environment_id,
+      run_id: action.run_id,
+      plan_digest: action.plan_digest,
+      green: true,
+      contracts: [
+        {
+          node: "api",
+          integration_id: "payments",
+          operation: "create-payment",
+          request_sha256: jsonDigest({ amount: 1000 }),
+          response_sha256: digest("8"),
+          observed_count: 1,
+          matched: true,
+          diagnostic: null,
+        },
+      ],
+      unexpected_requests: 0,
+      resource_usage: [
+        {
+          resource_id: "primary-db",
+          cpu_percent: 0.2,
+          memory_bytes: 1024,
+          pids: 2,
+        },
+      ],
+      artifact: {
+        sha256: digest("9"),
+        size: 12,
+        media_type: "application/json",
+      },
+    }),
 );
 reject(
   "rejects secret-shaped health details",

@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import type {
   ApplyMigrationsRequestV2,
+  CollectEnvironmentEvidenceRequestV2,
   EnvironmentActionRequestV2,
   EnvironmentHandleV2,
   EnvironmentHealthV2,
   EnvironmentSnapshotV2,
+  EnvironmentTestEvidenceV2,
   EnvironmentTeardownV2,
   MigrationResultV2,
   StartEnvironmentRequestV2,
@@ -13,6 +16,18 @@ import { RequestError } from "./validation.ts";
 type Fetcher = typeof fetch;
 const DIGEST = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}$/;
+const canonical = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+const jsonDigest = (value: unknown): string =>
+  createHash("sha256").update(canonical(value)).digest("hex");
 
 function exactKeys(
   value: unknown,
@@ -107,6 +122,10 @@ export interface EnvironmentManager {
     request: EnvironmentActionRequestV2,
     signal: AbortSignal,
   ): Promise<EnvironmentSnapshotV2>;
+  evidence(
+    request: CollectEnvironmentEvidenceRequestV2,
+    signal: AbortSignal,
+  ): Promise<EnvironmentTestEvidenceV2>;
   teardown(
     request: EnvironmentActionRequestV2,
     signal: AbortSignal,
@@ -208,6 +227,18 @@ export class HttpEnvironmentManager implements EnvironmentManager {
       request,
       signal,
     )) as EnvironmentSnapshotV2;
+  }
+
+  async evidence(
+    request: CollectEnvironmentEvidenceRequestV2,
+    signal: AbortSignal,
+  ): Promise<EnvironmentTestEvidenceV2> {
+    return (await this.request(
+      "POST",
+      "/v1/environments/evidence",
+      request,
+      signal,
+    )) as EnvironmentTestEvidenceV2;
   }
 
   async teardown(
@@ -477,6 +508,128 @@ export function verifyEnvironmentSnapshot(
   }
   verifyArtifact(snapshot.artifact, "environment snapshot artifact");
   return snapshot;
+}
+
+export function verifyEnvironmentTestEvidence(
+  request: CollectEnvironmentEvidenceRequestV2,
+  result: EnvironmentTestEvidenceV2,
+): EnvironmentTestEvidenceV2 {
+  exactKeys(
+    result,
+    [
+      "environment_id",
+      "run_id",
+      "plan_digest",
+      "green",
+      "contracts",
+      "unexpected_requests",
+      "resource_usage",
+      "artifact",
+    ],
+    "environment test evidence",
+  );
+  assertBound(request, result);
+  if (
+    result.run_id !== request.run_id ||
+    !Number.isSafeInteger(result.unexpected_requests) ||
+    result.unexpected_requests < 0
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      "environment test evidence identity or counters are invalid",
+    );
+  }
+  const expected = new Map(
+    request.expectations.map((item) => [
+      `${item.node}\0${item.integration_id}\0${item.operation}`,
+      item,
+    ]),
+  );
+  const seen = new Set<string>();
+  if (
+    !Array.isArray(result.contracts) ||
+    result.contracts.length !== expected.size ||
+    result.contracts.some((contract) => {
+      exactKeys(
+        contract,
+        [
+          "node",
+          "integration_id",
+          "operation",
+          "request_sha256",
+          "response_sha256",
+          "observed_count",
+          "matched",
+          "diagnostic",
+        ],
+        "contract evidence",
+      );
+      const key = `${contract.node}\0${contract.integration_id}\0${contract.operation}`;
+      const declared = expected.get(key);
+      safeEvidenceText(contract.diagnostic, "contract diagnostic", 512);
+      return (
+        !declared ||
+        seen.has(key) ||
+        !seen.add(key) ||
+        contract.request_sha256 !== jsonDigest(declared.request) ||
+        contract.response_sha256 !== jsonDigest(declared.response) ||
+        !Number.isSafeInteger(contract.observed_count) ||
+        contract.observed_count < 0 ||
+        typeof contract.matched !== "boolean"
+      );
+    })
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      "contract evidence does not exactly cover the accepted plan",
+    );
+  }
+  const resources = new Set(request.resources);
+  const measured = new Set<string>();
+  if (
+    !Array.isArray(result.resource_usage) ||
+    result.resource_usage.length !== resources.size ||
+    result.resource_usage.some((usage) => {
+      exactKeys(
+        usage,
+        ["resource_id", "cpu_percent", "memory_bytes", "pids"],
+        "resource usage",
+      );
+      return (
+        !resources.has(usage.resource_id) ||
+        measured.has(usage.resource_id) ||
+        !measured.add(usage.resource_id) ||
+        !Number.isFinite(usage.cpu_percent) ||
+        usage.cpu_percent < 0 ||
+        usage.cpu_percent > 100_000 ||
+        !Number.isSafeInteger(usage.memory_bytes) ||
+        usage.memory_bytes < 0 ||
+        !Number.isSafeInteger(usage.pids) ||
+        usage.pids < 0
+      );
+    })
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      "resource usage does not exactly cover the accepted plan",
+    );
+  }
+  if (
+    !result.green ||
+    result.unexpected_requests !== 0 ||
+    result.contracts.some((contract) => !contract.matched)
+  ) {
+    throw new RequestError(
+      422,
+      "CONTRACT_TEST_FAILED",
+      "declared integration contracts did not reach green",
+    );
+  }
+  verifyArtifact(result.artifact, "environment test artifact");
+  return result;
 }
 
 export function verifyEnvironmentTeardown(

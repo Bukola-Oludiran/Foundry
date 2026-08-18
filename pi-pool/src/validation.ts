@@ -5,6 +5,7 @@ import type {
   BuildRequestV2,
   ArchitectureJobRequest,
   ApplyMigrationsRequestV2,
+  CollectEnvironmentEvidenceRequestV2,
   EnvironmentActionRequestV2,
   JobContext,
   ResolveDependenciesRequestV2,
@@ -101,6 +102,23 @@ function exactKeys(
       400,
       "INVALID_REQUEST",
       `${label} has unknown fields: ${unexpected.join(", ")}`,
+    );
+  }
+}
+
+function boundedPublicJson(value: unknown, label: string): void {
+  const encoded = JSON.stringify(value);
+  if (
+    encoded === undefined ||
+    encoded.length > 64 * 1024 ||
+    /authorization|bearer |cookie|password|private[_ -]?key|nsec1|ghp_|github_pat_/i.test(
+      encoded,
+    )
+  ) {
+    throw new RequestError(
+      400,
+      "INVALID_REQUEST",
+      `${label} is oversized or contains secret-shaped material`,
     );
   }
 }
@@ -1030,6 +1048,7 @@ export function validateStartEnvironmentRequest(
       "resources",
       "integrations",
       "migrations",
+      "integration_expectations",
     ],
     "plan",
   );
@@ -1232,6 +1251,40 @@ export function validateStartEnvironmentRequest(
       );
     }
   }
+  const expectationKeys = new Set<string>();
+  for (const [index, rawExpectation] of array(
+    plan.integration_expectations,
+    "plan.integration_expectations",
+    1024,
+  ).entries()) {
+    const label = `plan.integration_expectations[${index}]`;
+    const expectation = object(rawExpectation, label);
+    exactKeys(
+      expectation,
+      ["node", "integration_id", "operation", "request", "response"],
+      label,
+    );
+    const node = safeIdentifier(expectation.node, `${label}.node`);
+    const integration = safeIdentifier(
+      expectation.integration_id,
+      `${label}.integration_id`,
+    );
+    const operation = string(expectation.operation, `${label}.operation`);
+    if (!declaredIntegrations.has(integration)) {
+      throw new RequestError(
+        400,
+        "INVALID_REQUEST",
+        `${label} targets an undeclared integration`,
+      );
+    }
+    const key = `${node}\0${integration}\0${operation}`;
+    if (expectationKeys.has(key)) {
+      throw new RequestError(400, "INVALID_REQUEST", `${label} is duplicate`);
+    }
+    expectationKeys.add(key);
+    boundedPublicJson(expectation.request, `${label}.request`);
+    boundedPublicJson(expectation.response, `${label}.response`);
+  }
   const images = object(raw.resource_images, "resource_images");
   if (
     Object.keys(images).length !== imageKeys.size ||
@@ -1270,6 +1323,78 @@ export function validateEnvironmentActionRequest(
   safeIdentifier(raw.environment_id, "environment_id");
   digest(raw.plan_digest, "plan_digest");
   return raw as unknown as EnvironmentActionRequestV2;
+}
+
+export function validateCollectEnvironmentEvidenceRequest(
+  value: unknown,
+): CollectEnvironmentEvidenceRequestV2 {
+  const raw = object(value, "request");
+  exactKeys(
+    raw,
+    [
+      "protocol_version",
+      "job_id",
+      "run_id",
+      "environment_id",
+      "plan_digest",
+      "expectations",
+      "resources",
+    ],
+    "request",
+  );
+  if (raw.protocol_version !== WORKER_PROTOCOL_V2) {
+    throw new RequestError(
+      400,
+      "UNSUPPORTED_PROTOCOL",
+      "protocol_version must be 2",
+    );
+  }
+  safeIdentifier(raw.job_id, "job_id");
+  safeIdentifier(raw.run_id, "run_id");
+  safeIdentifier(raw.environment_id, "environment_id");
+  digest(raw.plan_digest, "plan_digest");
+  const keys = new Set<string>();
+  for (const [index, candidate] of array(
+    raw.expectations,
+    "expectations",
+    1024,
+  ).entries()) {
+    const label = `expectations[${index}]`;
+    const expectation = object(candidate, label);
+    exactKeys(
+      expectation,
+      ["node", "integration_id", "operation", "request", "response"],
+      label,
+    );
+    const node = safeIdentifier(expectation.node, `${label}.node`);
+    const integration = safeIdentifier(
+      expectation.integration_id,
+      `${label}.integration_id`,
+    );
+    const operation = string(expectation.operation, `${label}.operation`);
+    const key = `${node}\0${integration}\0${operation}`;
+    if (keys.has(key))
+      throw new RequestError(400, "INVALID_REQUEST", `${label} is duplicate`);
+    keys.add(key);
+    boundedPublicJson(expectation.request, `${label}.request`);
+    boundedPublicJson(expectation.response, `${label}.response`);
+  }
+  const resources = new Set<string>();
+  for (const [index, candidate] of array(
+    raw.resources,
+    "resources",
+    256,
+  ).entries()) {
+    const resource = safeIdentifier(candidate, `resources[${index}]`);
+    if (resources.has(resource))
+      throw new RequestError(
+        400,
+        "INVALID_REQUEST",
+        "resources contains duplicates",
+      );
+    resources.add(resource);
+  }
+  return raw as unknown as CollectEnvironmentEvidenceRequestV2;
 }
 
 export function validateApplyMigrationsRequest(

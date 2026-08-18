@@ -15,6 +15,7 @@
     "validate:dependency-resolver-command": "node scripts/validate-dependency-resolver-command.ts",
     "validate:environment-manager": "node scripts/validate-environment-manager.ts",
     "validate:environment-controller": "node scripts/validate-environment-controller.ts",
+    "validate:integration-emulator": "node scripts/validate-integration-emulator.ts",
     "validate:runtime-images": "node scripts/validate-runtime-images.ts",
     "validate:package-backends": "node scripts/validate-package-backends.ts",
     "validate:project-runner": "node scripts/validate-project-runner.ts",
@@ -31,7 +32,7 @@
     "validate:worker-v2": "node scripts/validate-worker-v2.ts",
     "validate:durable-restart": "node scripts/validate-durable-restart.ts",
     "validate:oci": "node scripts/validate-oci-sandbox.ts",
-    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:evidence && npm run validate:dependency-resolution && npm run validate:dependency-resolver-command && npm run validate:package-backends && npm run validate:environment-manager && npm run validate:environment-controller && npm run validate:runtime-images && npm run validate:project-runner && npm run validate:project-runner-service && npm run validate:worker-v2 && npm run validate:doer-tools && npm run validate:architect && npm run validate:security && npm run validate:worker-restart && npm run validate:v2-server",
+    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:evidence && npm run validate:dependency-resolution && npm run validate:dependency-resolver-command && npm run validate:package-backends && npm run validate:environment-manager && npm run validate:environment-controller && npm run validate:integration-emulator && npm run validate:runtime-images && npm run validate:project-runner && npm run validate:project-runner-service && npm run validate:worker-v2 && npm run validate:doer-tools && npm run validate:architect && npm run validate:security && npm run validate:worker-restart && npm run validate:v2-server",
     "test:local": "npm test && npm run validate:sandbox && npm run validate:build && npm run validate:server"
   },
   "dependencies": {

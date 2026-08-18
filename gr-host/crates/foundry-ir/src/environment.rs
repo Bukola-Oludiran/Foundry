@@ -41,7 +41,17 @@ pub struct MigrationPlanV1 {
     pub require_repeatable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationExpectationPlanV1 {
+    pub node: String,
+    pub integration_id: String,
+    pub operation: String,
+    pub request: serde_json::Value,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentPlanV1 {
     pub environment_plan_version: u32,
@@ -51,6 +61,7 @@ pub struct EnvironmentPlanV1 {
     pub resources: Vec<ResourceServicePlanV1>,
     pub integrations: Vec<IntegrationEmulatorPlanV1>,
     pub migrations: Vec<MigrationPlanV1>,
+    pub integration_expectations: Vec<IntegrationExpectationPlanV1>,
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -127,6 +138,30 @@ pub fn plan_test_environment(ir: &IrV2) -> Result<EnvironmentPlanV1, Vec<Compile
         .collect::<Vec<_>>();
     migrations.sort_by(|left, right| left.resource_id.cmp(&right.resource_id));
 
+    let mut integration_expectations = ir
+        .test_environments
+        .iter()
+        .flat_map(|environment| {
+            environment
+                .integration_expectations
+                .iter()
+                .map(|expectation| IntegrationExpectationPlanV1 {
+                    node: environment.node.clone(),
+                    integration_id: expectation.integration.clone(),
+                    operation: expectation.operation.clone(),
+                    request: expectation.request.clone(),
+                    response: expectation.response.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    integration_expectations.sort_by(|left, right| {
+        (&left.integration_id, &left.operation, &left.node).cmp(&(
+            &right.integration_id,
+            &right.operation,
+            &right.node,
+        ))
+    });
+
     let ir_digest = ir_v2_digest(ir);
     let digest_input = serde_json::to_vec(&(
         ENVIRONMENT_PLAN_VERSION,
@@ -134,6 +169,7 @@ pub fn plan_test_environment(ir: &IrV2) -> Result<EnvironmentPlanV1, Vec<Compile
         &resources,
         &integrations,
         &migrations,
+        &integration_expectations,
     ))
     .expect("environment plan serialization is infallible");
     Ok(EnvironmentPlanV1 {
@@ -144,6 +180,7 @@ pub fn plan_test_environment(ir: &IrV2) -> Result<EnvironmentPlanV1, Vec<Compile
         resources,
         integrations,
         migrations,
+        integration_expectations,
     })
 }
 
@@ -164,6 +201,7 @@ mod tests {
         assert_eq!(left.resources[0].private_alias, "primary-db");
         assert_eq!(left.integrations[0].private_alias, "payments");
         assert_eq!(left.migrations[0].owner_node, "api");
+        assert_eq!(left.integration_expectations[0].operation, "create-payment");
         let serialized = serde_json::to_string(&left).unwrap();
         assert!(!serialized.contains("password"));
         assert!(!serialized.contains("localhost"));

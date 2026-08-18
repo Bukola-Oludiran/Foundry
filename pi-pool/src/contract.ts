@@ -426,6 +426,14 @@ export interface MigrationPlanV1 {
   require_repeatable: boolean;
 }
 
+export interface IntegrationExpectationPlanV1 {
+  node: string;
+  integration_id: string;
+  operation: string;
+  request: unknown;
+  response: unknown;
+}
+
 export interface EnvironmentPlanV1 {
   environment_plan_version: 1;
   ir_digest: string;
@@ -434,6 +442,7 @@ export interface EnvironmentPlanV1 {
   resources: ResourceServicePlanV1[];
   integrations: IntegrationEmulatorPlanV1[];
   migrations: MigrationPlanV1[];
+  integration_expectations: IntegrationExpectationPlanV1[];
 }
 
 export interface StartEnvironmentRequestV2 {
@@ -459,6 +468,11 @@ export interface EnvironmentActionRequestV2 {
 export interface ApplyMigrationsRequestV2 extends EnvironmentActionRequestV2 {
   workspace: string;
   migrations: MigrationPlanV1[];
+}
+
+export interface CollectEnvironmentEvidenceRequestV2 extends EnvironmentActionRequestV2 {
+  expectations: IntegrationExpectationPlanV1[];
+  resources: string[];
 }
 
 export interface MigrationOutcomeV2 {
@@ -504,6 +518,35 @@ export interface EnvironmentSnapshotV2 {
   environment_id: string;
   plan_digest: string;
   snapshot_digest: string;
+  artifact: ContentArtifact;
+}
+
+export interface ContractExpectationResultV2 {
+  node: string;
+  integration_id: string;
+  operation: string;
+  request_sha256: string;
+  response_sha256: string;
+  observed_count: number;
+  matched: boolean;
+  diagnostic: string | null;
+}
+
+export interface ResourceUsageV2 {
+  resource_id: string;
+  cpu_percent: number;
+  memory_bytes: number;
+  pids: number;
+}
+
+export interface EnvironmentTestEvidenceV2 {
+  environment_id: string;
+  run_id: string;
+  plan_digest: string;
+  green: boolean;
+  contracts: ContractExpectationResultV2[];
+  unexpected_requests: number;
+  resource_usage: ResourceUsageV2[];
   artifact: ContentArtifact;
 }
 

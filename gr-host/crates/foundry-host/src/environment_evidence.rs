@@ -66,6 +66,41 @@ struct EnvironmentSnapshotV1 {
     artifact: ArtifactRefV1,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractExpectationResultV2 {
+    node: String,
+    integration_id: String,
+    operation: String,
+    request_sha256: String,
+    response_sha256: String,
+    observed_count: u64,
+    matched: bool,
+    diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceUsageV2 {
+    resource_id: String,
+    cpu_percent: f64,
+    memory_bytes: u64,
+    pids: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentTestEvidenceV2 {
+    environment_id: String,
+    run_id: String,
+    plan_digest: String,
+    green: bool,
+    contracts: Vec<ContractExpectationResultV2>,
+    unexpected_requests: u64,
+    resource_usage: Vec<ResourceUsageV2>,
+    artifact: ArtifactRefV1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EnvironmentTeardownV1 {
@@ -76,7 +111,7 @@ struct EnvironmentTeardownV1 {
     diagnostic_artifact: Option<ArtifactRefV1>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EnvironmentLifecycleEvidenceV1 {
     evidence_version: u32,
@@ -85,6 +120,7 @@ struct EnvironmentLifecycleEvidenceV1 {
     health: EnvironmentHealthV1,
     migrations: Option<MigrationResultV1>,
     snapshot: EnvironmentSnapshotV1,
+    test_evidence: EnvironmentTestEvidenceV2,
     teardown: EnvironmentTeardownV1,
 }
 
@@ -144,6 +180,9 @@ fn validate_evidence(
         .map_err(|error| error.to_string())?;
     let snapshot: EnvironmentSnapshotV1 =
         serde_json::from_value(evidence.snapshot.clone()).map_err(|error| error.to_string())?;
+    let test_evidence: EnvironmentTestEvidenceV2 =
+        serde_json::from_value(evidence.test_evidence.clone())
+            .map_err(|error| error.to_string())?;
     let teardown: EnvironmentTeardownV1 =
         serde_json::from_value(evidence.teardown.clone()).map_err(|error| error.to_string())?;
 
@@ -158,6 +197,7 @@ fn validate_evidence(
         || migrations
             .as_ref()
             .is_some_and(|result| !identity_matches(&result.environment_id, &result.plan_digest))
+        || !identity_matches(&test_evidence.environment_id, &test_evidence.plan_digest)
     {
         return Err("environment lifecycle evidence does not share one identity".into());
     }
@@ -207,6 +247,42 @@ fn validate_evidence(
         return Err("environment snapshot digest is invalid".into());
     }
     validate_artifact(&snapshot.artifact)?;
+    let mut contract_keys = BTreeSet::new();
+    let mut usage_ids = BTreeSet::new();
+    if !test_evidence.green
+        || test_evidence.unexpected_requests != 0
+        || !is_safe_id(&test_evidence.run_id)
+        || test_evidence.contracts.len() > 1024
+        || test_evidence.resource_usage.len() > MAX_SERVICES
+        || test_evidence.contracts.iter().any(|contract| {
+            !is_safe_id(&contract.node)
+                || !is_safe_id(&contract.integration_id)
+                || !contract_keys.insert(format!(
+                    "{}\0{}\0{}",
+                    contract.node, contract.integration_id, contract.operation
+                ))
+                || contract.operation.is_empty()
+                || contract.operation.len() > 256
+                || !is_digest(&contract.request_sha256)
+                || !is_digest(&contract.response_sha256)
+                || contract.observed_count == 0
+                || !contract.matched
+                || contract.diagnostic.as_ref().is_some_and(|diagnostic| {
+                    diagnostic.len() > 512 || contains_secret_material(diagnostic)
+                })
+        })
+        || test_evidence.resource_usage.iter().any(|usage| {
+            !is_safe_id(&usage.resource_id)
+                || !usage_ids.insert(usage.resource_id.clone())
+                || !usage.cpu_percent.is_finite()
+                || usage.cpu_percent < 0.0
+                || usage.cpu_percent > 100_000.0
+                || usage.pids > 1_000_000
+        })
+    {
+        return Err("environment contract or resource-usage evidence is not green".into());
+    }
+    validate_artifact(&test_evidence.artifact)?;
     if !teardown.stopped || !teardown.cleanup_complete {
         return Err("environment teardown evidence is incomplete".into());
     }
@@ -215,12 +291,13 @@ fn validate_evidence(
     }
 
     Ok(EnvironmentLifecycleEvidenceV1 {
-        evidence_version: 1,
+        evidence_version: 2,
         environment_id: health.environment_id.clone(),
         plan_digest: health.plan_digest.clone(),
         health,
         migrations,
         snapshot,
+        test_evidence,
         teardown,
     })
 }
@@ -351,6 +428,30 @@ mod tests {
                 "snapshot_digest": "d".repeat(64),
                 "artifact": artifact("e")
             }),
+            test_evidence: json!({
+                "environment_id": "environment-run-1",
+                "run_id": "run-1",
+                "plan_digest": "a".repeat(64),
+                "green": true,
+                "contracts": [{
+                    "node": "api",
+                    "integration_id": "payments",
+                    "operation": "create-payment",
+                    "request_sha256": "f".repeat(64),
+                    "response_sha256": "1".repeat(64),
+                    "observed_count": 1,
+                    "matched": true,
+                    "diagnostic": null
+                }],
+                "unexpected_requests": 0,
+                "resource_usage": [{
+                    "resource_id": "primary-db",
+                    "cpu_percent": 0.1,
+                    "memory_bytes": 1024,
+                    "pids": 2
+                }],
+                "artifact": artifact("2")
+            }),
             teardown: json!({
                 "environment_id": "environment-run-1",
                 "plan_digest": "a".repeat(64),
@@ -369,7 +470,7 @@ mod tests {
         materialize_environment_evidence(&worktree, &evidence()).unwrap();
         let persisted: serde_json::Value =
             serde_json::from_slice(&std::fs::read(worktree.path.join(&paths[0])).unwrap()).unwrap();
-        assert_eq!(persisted["evidence_version"], 1);
+        assert_eq!(persisted["evidence_version"], 2);
         let _ = std::fs::remove_dir_all(worktree.path);
     }
 

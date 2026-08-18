@@ -107,6 +107,18 @@ const environment: EnvironmentManager = {
       artifact: artifact("e"),
     };
   },
+  async evidence(request) {
+    return {
+      environment_id: request.environment_id,
+      run_id: request.run_id,
+      plan_digest: request.plan_digest,
+      green: true,
+      contracts: [],
+      unexpected_requests: 0,
+      resource_usage: [],
+      artifact: artifact("d"),
+    };
+  },
   async teardown(request) {
     return {
       environment_id: request.environment_id,
@@ -238,6 +250,7 @@ const environmentStart = {
     resources: [],
     integrations: [],
     migrations: [],
+    integration_expectations: [],
   },
   resource_images: {},
   emulator_image: `registry.example/emulator@sha256:${digest("7")}`,
@@ -323,6 +336,17 @@ try {
   const started = await post("/v2/environments/start", environmentStart);
   if (started.status !== 200) failed = true;
   await started.text();
+  const environmentEvidence = await post("/v2/environments/evidence", {
+    protocol_version: 2,
+    job_id: "v2:environment:evidence",
+    run_id: "v2",
+    environment_id: "environment-v2",
+    plan_digest: digest("f"),
+    expectations: [],
+    resources: [],
+  });
+  if (environmentEvidence.status !== 200) failed = true;
+  await environmentEvidence.text();
   for (let index = 0; index < 2; index++) {
     const tested = await post("/test", projectTest);
     if (tested.status !== 200) failed = true;

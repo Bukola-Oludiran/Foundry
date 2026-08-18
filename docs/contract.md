@@ -197,7 +197,7 @@ integration emulator contracts, and migration ownership—never ports, connectio
 credentials. Runtime credentials belong only to the `EnvironmentManager` secret boundary.
 
 An operator-supplied `EnvironmentManager` is available through idempotent worker protocol v2
-routes for `start`, `health`, `migrations`, `snapshot`, and `teardown`. Start requests must exactly cover each
+routes for `start`, `health`, `migrations`, `snapshot`, `evidence`, and `teardown`. Start requests must exactly cover each
 logical service with digest-pinned images and declare `private-integration` networking; the accepted
 plan itself always says `network_egress: none`. Manager responses are checked against the durable
 run, environment, and plan identities, and undeclared aliases or incomplete cleanup fail closed.
@@ -206,6 +206,13 @@ run, environment, and plan identities, and undeclared aliases or incomplete clea
 Declared migrations run between health and snapshot. Their request is workspace-contained and bound
 to the exclusive schema owner; green evidence must cover every migration digest and prove repeat
 application whenever the IR mandates it. Teardown is attempted after every verification outcome.
+
+The environment plan carries the exact deterministic integration expectations from IR v2. Once
+all node tests are green, Foundry calls `POST /v2/environments/evidence` before teardown. The result
+must exactly cover every declared node/integration/operation tuple and resource identity, bind to
+the same run, environment, and plan digest, and contain only canonical request/response SHA-256
+digests, observation counts, bounded diagnostics, and CPU/memory/PID measurements. Unexpected or
+missing interactions fail closed. This post-test effect and its artifact are replay-idempotent.
 
 Set `FOUNDRY_ENVIRONMENT_MANAGER_URL` and `FOUNDRY_ENVIRONMENT_MANAGER_TOKEN` together to enable the
 built-in controller adapter. Non-loopback controllers require HTTPS; URLs containing credentials,
@@ -241,7 +248,7 @@ named-case coverage. Unknown fields, absolute paths, secrets, and raw process ou
 before persistence.
 
 For IR v2, `foundry build` requires local durability. Its preflight node commits dependency
-resolution, environment start/health, migration, and snapshot operations as stable idempotent
+resolution, environment start/health, migration, snapshot, and post-test evidence operations as stable idempotent
 effects before admitting implementation nodes. Node requests receive only their package root,
 resource/integration bindings, logical secret handles, and the exact environment snapshot.
 Successful and failed builds tear down an environment through the same durable effect boundary;
@@ -254,9 +261,9 @@ authoritative completion and bounded cleanup evidence are committed to the Graph
 artifact store. Restart resumes `cancelling`; it never reports `cancelled` before cleanup completes.
 
 After a successful durable repository build, Foundry validates the recovered health, migration,
-snapshot, and teardown records as one lifecycle before materializing
+snapshot, contract/resource-usage evidence, and teardown records as one lifecycle before materializing
 `.foundry/resources/evidence.json`. The records must share the exact environment and plan
-identities; health, required migrations, and cleanup must be green; artifact metadata and authored
+identities; health, required migrations, contract expectations, resource coverage, and cleanup must be green; artifact metadata and authored
 diagnostics are strictly bounded; and unknown fields or secret-shaped text fail closed. The file is
 created recovery-safely inside the isolated worktree, accepts an identical replay, and refuses to
 replace conflicting evidence. It contains no credentials, connection strings, endpoints, raw
