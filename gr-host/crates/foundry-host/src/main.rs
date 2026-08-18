@@ -25,12 +25,14 @@ mod studio_room;
 mod studio_service;
 use http::http_post_json;
 use repository::{
-    git_revision, materialize_architecture_files, DiffPolicy, GitHubRepositoryProvider,
-    LocalGitRepository, PullRequestPublisher, RepositoryProvider,
+    git_revision, materialize_architecture_files, materialize_generated_resources, DiffPolicy,
+    GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher, RepositoryProvider,
 };
 
 use foundry_ir::types::{Ir, Kind, Node};
-use foundry_ir::{compile, BuildPlan};
+use foundry_ir::{
+    compile, compile_v2, plan_dependency_resolution, plan_test_environment, BuildPlan, IrDocument,
+};
 use graphreact_core::{
     use_message, Attrs, CommunicationGraph, MessageDelivered, NodeContext, NodeDefinition,
     NodeMounted, PermissionManifest, Scheduler, TelemetrySink,
@@ -57,6 +59,13 @@ enum Verdict {
 struct Job {
     build_req: Value,
     test_req: Value,
+}
+
+#[derive(Clone, Copy)]
+struct StudioJobContext<'a> {
+    proposal_id: Option<&'a str>,
+    revision_id: Option<&'a str>,
+    semantic_digest: Option<&'a str>,
 }
 
 struct AuditSink {
@@ -155,6 +164,7 @@ fn build_jobs(
     ir_digest: &str,
     run_id: &str,
     base_commit: &str,
+    studio: StudioJobContext<'_>,
 ) -> HashMap<String, Job> {
     let by_id: HashMap<&str, &Node> = ir.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let default_lang = ir
@@ -213,7 +223,7 @@ fn build_jobs(
                 "network": "model-egress",
             },
         });
-        let build_req = json!({
+        let mut build_req = json!({
             "protocol_version": context["protocol_version"], "job_id": context["job_id"],
             "run_id": context["run_id"], "ir_digest": context["ir_digest"],
             "base_commit": context["base_commit"], "resource_policy": context["resource_policy"],
@@ -222,7 +232,7 @@ fn build_jobs(
             "requires": requires, "composition": n.implementation.composition,
             "children": children, "attempt": 1, "feedback": Value::Null,
         });
-        let test_req = json!({
+        let mut test_req = json!({
             "protocol_version": context["protocol_version"], "job_id": context["job_id"],
             "run_id": context["run_id"], "ir_digest": context["ir_digest"],
             "base_commit": context["base_commit"], "resource_policy": {
@@ -234,6 +244,17 @@ fn build_jobs(
             "write_target": n.implementation.write_target, "provides": provides,
             "acceptance": serde_json::to_value(&n.acceptance).unwrap_or(Value::Null), "deps": deps,
         });
+        for request in [&mut build_req, &mut test_req] {
+            if let Some(proposal_id) = studio.proposal_id {
+                request["proposal_id"] = json!(proposal_id);
+            }
+            if let Some(revision_id) = studio.revision_id {
+                request["revision_id"] = json!(revision_id);
+            }
+            if let Some(semantic_digest) = studio.semantic_digest {
+                request["semantic_digest"] = json!(semantic_digest);
+            }
+        }
         jobs.insert(
             n.id.clone(),
             Job {
@@ -243,6 +264,216 @@ fn build_jobs(
         );
     }
     jobs
+}
+
+fn v2_execution_plan(
+    ir: &foundry_ir::v2::IrV2,
+    workspace: &str,
+    run_id: &str,
+    base_commit: &str,
+) -> Result<durable::V2ExecutionPlan, String> {
+    let dependency_plan = plan_dependency_resolution(ir).map_err(|errors| {
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    let environment_plan = plan_test_environment(ir).map_err(|errors| {
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    let dependency_request = if dependency_plan.roots.is_empty() {
+        None
+    } else {
+        let resolver_image = std::env::var("FOUNDRY_RESOLVER_IMAGE").map_err(|_| {
+            "FOUNDRY_RESOLVER_IMAGE is required for an IR v2 package build".to_string()
+        })?;
+        let existing_repository = dependency_plan.roots.iter().any(|root| {
+            std::path::Path::new(workspace)
+                .join(&root.manifest_path)
+                .exists()
+                || std::path::Path::new(workspace)
+                    .join(&root.lockfile_path)
+                    .exists()
+        });
+        Some(json!({
+            "protocol_version": 2,
+            "job_id": format!("{run_id}:dependencies"),
+            "run_id": run_id,
+            "ir_digest": dependency_plan.ir_digest,
+            "base_commit": base_commit,
+            "workspace": workspace,
+            "resolver_image": resolver_image,
+            "platform": std::env::var("FOUNDRY_RESOLVER_PLATFORM").unwrap_or_else(|_| "linux/amd64".into()),
+            "existing_repository": existing_repository,
+            "resource_policy": {
+                "timeout_ms": 300_000,
+                "memory_mb": 2048,
+                "cpu_count": 2,
+                "pids": 512,
+                "network": "registry-egress"
+            },
+            "plan": dependency_plan,
+            "policy": foundry_ir::SupplyChainPolicyV1::default(),
+        }))
+    };
+    let needs_environment = !environment_plan.resources.is_empty()
+        || !environment_plan.integrations.is_empty()
+        || !environment_plan.migrations.is_empty();
+    let environment_start_request = if needs_environment {
+        let resource_images: Value = std::env::var("FOUNDRY_RESOURCE_IMAGES_JSON")
+            .map_err(|_| {
+                "FOUNDRY_RESOURCE_IMAGES_JSON is required for an IR v2 resource build".to_string()
+            })
+            .and_then(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|error| format!("invalid FOUNDRY_RESOURCE_IMAGES_JSON: {error}"))
+            })?;
+        let emulator_image = std::env::var("FOUNDRY_EMULATOR_IMAGE").map_err(|_| {
+            "FOUNDRY_EMULATOR_IMAGE is required for an IR v2 integration build".to_string()
+        })?;
+        Some(json!({
+            "protocol_version": 2,
+            "job_id": format!("{run_id}:environment:start"),
+            "run_id": run_id,
+            "ir_digest": environment_plan.ir_digest,
+            "base_commit": base_commit,
+            "plan": environment_plan,
+            "resource_images": resource_images,
+            "emulator_image": emulator_image,
+            "resource_policy": {
+                "timeout_ms": 300_000,
+                "memory_mb": 4096,
+                "cpu_count": 4,
+                "pids": 1024,
+                "network": "private-integration"
+            }
+        }))
+    } else {
+        None
+    };
+
+    let resources_by_id: HashMap<_, _> = ir
+        .resources
+        .iter()
+        .map(|resource| (resource.id.as_str(), resource))
+        .collect();
+    let integrations_by_id: HashMap<_, _> = ir
+        .integrations
+        .iter()
+        .map(|integration| (integration.id.as_str(), integration))
+        .collect();
+    let roots_by_id: HashMap<_, _> = ir
+        .package_roots
+        .iter()
+        .map(|root| (root.id.as_str(), root))
+        .collect();
+    let mut node_bindings = BTreeMap::new();
+    for node in &ir.nodes {
+        let package_roots = ir
+            .packages
+            .iter()
+            .filter(|package| package.owner_node == node.id)
+            .map(|package| package.package_root.as_str())
+            .collect::<BTreeSet<_>>();
+        if package_roots.len() > 1 {
+            return Err(format!(
+                "node `{}` spans multiple package roots; worker protocol v2 supports one package root per node",
+                node.id
+            ));
+        }
+        let package_root = package_roots
+            .first()
+            .and_then(|id| roots_by_id.get(id))
+            .map(|root| {
+                json!({
+                    "id": root.id,
+                    "manifest_path": root.manifest_path,
+                    "lockfile_path": root.lockfile_path,
+                })
+            })
+            .unwrap_or(Value::Null);
+        let resource_bindings = ir
+            .resource_bindings
+            .iter()
+            .filter(|binding| binding.node == node.id)
+            .filter_map(|binding| {
+                let resource = resources_by_id.get(binding.resource.as_str())?;
+                let mut environment = serde_json::Map::new();
+                let mut secret_handles = Vec::new();
+                for (logical_name, environment_name) in &binding.environment {
+                    let handle = format!("resource:{}:{logical_name}", binding.resource);
+                    environment.insert(environment_name.clone(), json!(handle));
+                    secret_handles.push(handle);
+                }
+                Some(json!({
+                    "resource_id": binding.resource,
+                    "kind": resource.kind,
+                    "alias": binding.resource,
+                    "permissions": binding.permissions,
+                    "environment": environment,
+                    "secret_handles": secret_handles,
+                }))
+            })
+            .collect::<Vec<_>>();
+        let integration_bindings = ir
+            .integration_bindings
+            .iter()
+            .filter(|binding| binding.node == node.id)
+            .filter_map(|binding| {
+                let integration = integrations_by_id.get(binding.integration.as_str())?;
+                Some(json!({
+                    "integration_id": binding.integration,
+                    "kind": integration.kind,
+                    "alias": binding.integration,
+                    "operations": binding.operations,
+                    "timeout_ms": binding.timeout_ms,
+                    "idempotency": binding.idempotency,
+                    "secret_handles": binding.secret_ref.iter().cloned().collect::<Vec<_>>(),
+                }))
+            })
+            .collect::<Vec<_>>();
+        let secret_handles = resource_bindings
+            .iter()
+            .flat_map(|binding| {
+                binding
+                    .get("secret_handles")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .chain(integration_bindings.iter().flat_map(|binding| {
+                binding
+                    .get("secret_handles")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            }))
+            .collect::<Vec<_>>();
+        node_bindings.insert(
+            node.id.clone(),
+            json!({
+                "package_root": package_root,
+                "resource_bindings": resource_bindings,
+                "integration_bindings": integration_bindings,
+                "secret_handles": secret_handles,
+            }),
+        );
+    }
+    Ok(durable::V2ExecutionPlan {
+        dependency_request,
+        environment_start_request,
+        migrations: serde_json::to_value(&environment_plan.migrations)
+            .map_err(|error| error.to_string())?,
+        workspace: workspace.to_owned(),
+        node_bindings,
+    })
 }
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
@@ -268,8 +499,287 @@ fn report(node: &str, verdict: &Verdict) -> bool {
     }
 }
 
+fn read_v2_ir(path: &str) -> foundry_ir::v2::IrV2 {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        eprintln!("read {path}: {error}");
+        std::process::exit(1);
+    });
+    match serde_json::from_str::<IrDocument>(&raw).unwrap_or_else(|error| {
+        eprintln!("invalid IR JSON: {error}");
+        std::process::exit(1);
+    }) {
+        IrDocument::V2(ir) => ir,
+        IrDocument::V1(_) => {
+            eprintln!("this command requires IR v2; IR v1 remains supported by validate and build");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn print_or_write_json(args: &[String], value: &impl serde::Serialize) {
+    let rendered = serde_json::to_string_pretty(value).expect("command output serializes");
+    if let Some(output) = arg(args, "--output") {
+        std::fs::write(&output, format!("{rendered}\n")).unwrap_or_else(|error| {
+            eprintln!("write {output}: {error}");
+            std::process::exit(1);
+        });
+        println!("wrote {output}");
+    } else {
+        println!("{rendered}");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|value| value == "deps") {
+        let Some(action) = args.get(2).map(String::as_str) else {
+            eprintln!("usage: foundry-host deps <resolve|audit> --ir <file> [--output <file>]");
+            std::process::exit(2);
+        };
+        let Some(ir_path) = arg(&args, "--ir") else {
+            eprintln!("usage: foundry-host deps {action} --ir <file> [--output <file>]");
+            std::process::exit(2);
+        };
+        let ir = read_v2_ir(&ir_path);
+        let plan = plan_dependency_resolution(&ir).unwrap_or_else(|errors| {
+            errors.iter().for_each(|error| eprintln!("- {error}"));
+            std::process::exit(1);
+        });
+        match action {
+            "resolve" if has_flag(&args, "--dry-run") => print_or_write_json(&args, &plan),
+            "resolve" => {
+                let base =
+                    arg(&args, "--pi-pool").unwrap_or_else(|| "http://127.0.0.1:8787".into());
+                let token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
+                    eprintln!("FOUNDRY_WORKER_TOKEN is required (use --dry-run to print only the deterministic plan)");
+                    std::process::exit(2);
+                });
+                let resolver_image = std::env::var("FOUNDRY_RESOLVER_IMAGE").unwrap_or_else(|_| {
+                    eprintln!("FOUNDRY_RESOLVER_IMAGE must be a digest-pinned OCI image");
+                    std::process::exit(2);
+                });
+                let workspace = arg(&args, "--repo").unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|error| {
+                            eprintln!("resolve current repository: {error}");
+                            std::process::exit(1);
+                        })
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let existing_repository = plan.roots.iter().any(|root| {
+                    std::path::Path::new(&workspace)
+                        .join(&root.manifest_path)
+                        .exists()
+                        || std::path::Path::new(&workspace)
+                            .join(&root.lockfile_path)
+                            .exists()
+                });
+                let job_id = format!("deps-{}", &plan.plan_digest[..16]);
+                let result = http_post_json(
+                    &base,
+                    "/v2/dependencies/resolve",
+                    &json!({
+                        "protocol_version": 2,
+                        "job_id": job_id,
+                        "run_id": job_id,
+                        "ir_digest": plan.ir_digest,
+                        "base_commit": arg(&args, "--base").unwrap_or_else(|| "HEAD".into()),
+                        "workspace": workspace,
+                        "resolver_image": resolver_image,
+                        "platform": std::env::var("FOUNDRY_RESOLVER_PLATFORM")
+                            .unwrap_or_else(|_| "linux/amd64".into()),
+                        "existing_repository": existing_repository,
+                        "resource_policy": {
+                            "timeout_ms": 300_000,
+                            "memory_mb": 2048,
+                            "cpu_count": 2,
+                            "pids": 512,
+                            "network": "registry-egress"
+                        },
+                        "plan": plan,
+                        "policy": foundry_ir::SupplyChainPolicyV1::default(),
+                    }),
+                    &token,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("dependency resolution failed: {error}");
+                    std::process::exit(1);
+                });
+                print_or_write_json(&args, &result);
+            }
+            "audit" => {
+                let package_count: usize = plan.roots.iter().map(|root| root.packages.len()).sum();
+                print_or_write_json(
+                    &args,
+                    &json!({
+                        "audit_version": 1,
+                        "ir_digest": plan.ir_digest,
+                        "plan_digest": plan.plan_digest,
+                        "package_roots": plan.roots.len(),
+                        "declared_packages": package_count,
+                        "declarations": "valid",
+                        "resolution_evidence": "not_executed",
+                        "note": "build executes the pinned OCI resolver and fails closed on license or vulnerability policy"
+                    }),
+                );
+            }
+            _ => {
+                eprintln!("unknown deps command `{action}`; expected resolve or audit");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    if args.get(1).is_some_and(|value| value == "resources") {
+        let Some(action) = args.get(2).map(String::as_str) else {
+            eprintln!("usage: foundry-host resources plan --ir <file> [--output <file>]");
+            std::process::exit(2);
+        };
+        if !matches!(action, "plan" | "test") {
+            eprintln!("unknown resources command `{action}`; expected plan or test");
+            std::process::exit(2);
+        }
+        let Some(ir_path) = arg(&args, "--ir") else {
+            eprintln!("usage: foundry-host resources plan --ir <file> [--output <file>]");
+            std::process::exit(2);
+        };
+        let ir = read_v2_ir(&ir_path);
+        let plan = plan_test_environment(&ir).unwrap_or_else(|errors| {
+            errors.iter().for_each(|error| eprintln!("- {error}"));
+            std::process::exit(1);
+        });
+        if action == "plan" {
+            print_or_write_json(&args, &plan);
+            return;
+        }
+        let base = arg(&args, "--pi-pool").unwrap_or_else(|| "http://127.0.0.1:8787".into());
+        let token = std::env::var("FOUNDRY_WORKER_TOKEN").unwrap_or_else(|_| {
+            eprintln!("FOUNDRY_WORKER_TOKEN is required");
+            std::process::exit(2);
+        });
+        let resource_images: Value = std::env::var("FOUNDRY_RESOURCE_IMAGES_JSON")
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_else(|| {
+                eprintln!("FOUNDRY_RESOURCE_IMAGES_JSON must be a JSON object of image keys to digest-pinned OCI images");
+                std::process::exit(2);
+            });
+        let emulator_image = std::env::var("FOUNDRY_EMULATOR_IMAGE").unwrap_or_else(|_| {
+            eprintln!("FOUNDRY_EMULATOR_IMAGE must be a digest-pinned OCI image");
+            std::process::exit(2);
+        });
+        let run_id = format!("resources-{}", &plan.plan_digest[..16]);
+        let start = http_post_json(
+            &base,
+            "/v2/environments/start",
+            &json!({
+                "protocol_version": 2,
+                "job_id": format!("{run_id}:start"),
+                "run_id": run_id,
+                "ir_digest": plan.ir_digest,
+                "base_commit": arg(&args, "--base").unwrap_or_else(|| "HEAD".into()),
+                "plan": plan,
+                "resource_images": resource_images,
+                "emulator_image": emulator_image,
+                "resource_policy": {
+                    "timeout_ms": 300_000,
+                    "memory_mb": 4096,
+                    "cpu_count": 4,
+                    "pids": 1024,
+                    "network": "private-integration"
+                }
+            }),
+            &token,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("environment start failed: {error}");
+            std::process::exit(1);
+        });
+        let environment_id = start
+            .get("environment_id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                eprintln!("environment manager omitted environment_id");
+                std::process::exit(1);
+            });
+        let action_request = |suffix: &str| {
+            json!({
+                "protocol_version": 2,
+                "job_id": format!("{run_id}:{suffix}"),
+                "run_id": run_id,
+                "environment_id": environment_id,
+                "plan_digest": plan.plan_digest,
+            })
+        };
+        let workspace = arg(&args, "--repo").unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|error| {
+                    eprintln!("resolve current repository: {error}");
+                    std::process::exit(1);
+                })
+                .to_string_lossy()
+                .into_owned()
+        });
+        let phases: Result<(Value, Value, Value), String> = (|| {
+            let health = http_post_json(
+                &base,
+                "/v2/environments/health",
+                &action_request("health"),
+                &token,
+            )?;
+            if health.get("healthy").and_then(Value::as_bool) != Some(true) {
+                return Err(format!("environment is not healthy: {health}"));
+            }
+            let migrations = if plan.migrations.is_empty() {
+                json!({"green": true, "outcomes": []})
+            } else {
+                let mut request = action_request("migrations");
+                request["workspace"] = json!(workspace);
+                request["migrations"] =
+                    serde_json::to_value(&plan.migrations).map_err(|error| error.to_string())?;
+                http_post_json(&base, "/v2/environments/migrations", &request, &token)?
+            };
+            let snapshot = http_post_json(
+                &base,
+                "/v2/environments/snapshot",
+                &action_request("snapshot"),
+                &token,
+            )?;
+            Ok((health, migrations, snapshot))
+        })();
+        let teardown = http_post_json(
+            &base,
+            "/v2/environments/teardown",
+            &action_request("teardown"),
+            &token,
+        );
+        let (health, migrations, snapshot) = match phases {
+            Ok(phases) => phases,
+            Err(error) => {
+                eprintln!("environment verification failed: {error}");
+                if let Err(cleanup_error) = &teardown {
+                    eprintln!("environment teardown also failed: {cleanup_error}");
+                }
+                std::process::exit(1);
+            }
+        };
+        let teardown = teardown.unwrap_or_else(|error| {
+            eprintln!("environment teardown failed: {error}");
+            std::process::exit(1);
+        });
+        print_or_write_json(
+            &args,
+            &json!({
+                "start": start,
+                "health": health,
+                "migrations": migrations,
+                "snapshot": snapshot,
+                "teardown": teardown
+            }),
+        );
+        return;
+    }
     if args.get(1).is_some_and(|value| value == "sidecar") {
         sidecar::serve().unwrap_or_else(|error| {
             eprintln!("sidecar failed: {error}");
@@ -424,15 +934,33 @@ fn main() {
             eprintln!("read {ir_path}: {error}");
             std::process::exit(1);
         });
-        let ir: Ir = serde_json::from_str(&raw).unwrap_or_else(|error| {
+        let document: IrDocument = serde_json::from_str(&raw).unwrap_or_else(|error| {
             eprintln!("invalid IR JSON: {error}");
             std::process::exit(1);
         });
-        let plan = compile(&ir).unwrap_or_else(|errors| {
-            errors.iter().for_each(|error| eprintln!("- {error}"));
-            std::process::exit(1);
-        });
-        println!("valid IR v{}: {}", ir.ir_version, plan.order.join(" → "));
+        match document {
+            IrDocument::V1(ir) => {
+                let plan = compile(&ir).unwrap_or_else(|errors| {
+                    errors.iter().for_each(|error| eprintln!("- {error}"));
+                    std::process::exit(1);
+                });
+                println!("valid IR v{}: {}", ir.ir_version, plan.order.join(" → "));
+            }
+            IrDocument::V2(ir) => {
+                let plan = compile_v2(&ir).unwrap_or_else(|errors| {
+                    errors.iter().for_each(|error| eprintln!("- {error}"));
+                    std::process::exit(1);
+                });
+                println!(
+                    "valid IR v{}: {} ({} packages, {} resources, {} integrations)",
+                    ir.ir_version,
+                    plan.core.order.join(" → "),
+                    ir.packages.len(),
+                    ir.resources.len(),
+                    ir.integrations.len()
+                );
+            }
+        }
         return;
     }
     if args.get(1).is_some_and(|value| value == "architect") {
@@ -771,10 +1299,33 @@ fn main() {
         eprintln!("read {ir_path}: {e}");
         std::process::exit(1);
     });
-    let ir: Ir = serde_json::from_str(&raw).unwrap_or_else(|e| {
+    let document: IrDocument = serde_json::from_str(&raw).unwrap_or_else(|e| {
         eprintln!("parse IR: {e}");
         std::process::exit(1);
     });
+    let architecture_ir: Value = serde_json::from_str(&raw).expect("validated IR is JSON");
+    let (ir, plan, ir_v2) = match document {
+        IrDocument::V1(ir) => {
+            let plan = compile(&ir).unwrap_or_else(|errs| {
+                eprintln!("IR did not compile:");
+                for error in &errs {
+                    eprintln!("  - {error}");
+                }
+                std::process::exit(1);
+            });
+            (ir, plan, None)
+        }
+        IrDocument::V2(ir_v2) => {
+            let plan = compile_v2(&ir_v2).unwrap_or_else(|errs| {
+                eprintln!("IR v2 did not compile:");
+                for error in &errs {
+                    eprintln!("  - {error}");
+                }
+                std::process::exit(1);
+            });
+            (ir_v2.v1_core(), plan.core, Some(ir_v2))
+        }
+    };
     let ir_digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
     let only = arg(&args, "--only");
     let scope_key = only.as_deref().unwrap_or("all");
@@ -788,13 +1339,6 @@ fn main() {
         .join(".foundry")
         .join("attempts")
         .join(&run_id);
-    let plan = compile(&ir).unwrap_or_else(|errs| {
-        eprintln!("IR did not compile:");
-        for e in &errs {
-            eprintln!("  - {e}");
-        }
-        std::process::exit(1);
-    });
     let targets: BTreeMap<String, ()> = if let Some(only) = only {
         only.split(',')
             .map(str::trim)
@@ -839,7 +1383,7 @@ fn main() {
         base_commit.clone_from(&worktree.base_commit);
         println!("  branch:       {}", worktree.branch);
     }
-    let architecture_paths = if let Some(worktree) = &run_worktree {
+    let mut architecture_paths = if let Some(worktree) = &run_worktree {
         match (
             arg(&args, "--studio-rationale"),
             arg(&args, "--studio-layout"),
@@ -858,7 +1402,7 @@ fn main() {
                 };
                 materialize_architecture_files(
                     worktree,
-                    &ir,
+                    &architecture_ir,
                     &read_json(&rationale),
                     &read_json(&layout),
                     &read_json(&locks),
@@ -877,6 +1421,19 @@ fn main() {
     } else {
         Vec::new()
     };
+    if let (Some(worktree), Some(ir_v2)) = (&run_worktree, &ir_v2) {
+        let generated = foundry_ir::generate_resource_files(ir_v2).unwrap_or_else(|errors| {
+            eprintln!("generate IR v2 resource manifests:");
+            errors.iter().for_each(|error| eprintln!("  - {error}"));
+            std::process::exit(1);
+        });
+        architecture_paths.extend(
+            materialize_generated_resources(worktree, &generated).unwrap_or_else(|error| {
+                eprintln!("materialize IR v2 resource manifests: {error}");
+                std::process::exit(1);
+            }),
+        );
+    }
     let ws = attempt_path.to_string_lossy().into_owned();
     std::fs::create_dir_all(format!("{ws}/src")).ok();
 
@@ -892,7 +1449,22 @@ fn main() {
         &ir_digest,
         &run_id,
         &base_commit,
+        StudioJobContext {
+            proposal_id: arg(&args, "--studio-proposal-id").as_deref(),
+            revision_id: arg(&args, "--studio-revision-id").as_deref(),
+            semantic_digest: arg(&args, "--studio-semantic-digest").as_deref(),
+        },
     ));
+    if ir_v2.is_some() && durability != "local" {
+        eprintln!("IR v2 builds require --durability local");
+        std::process::exit(2);
+    }
+    let v2_plan = ir_v2.as_ref().map(|ir_v2| {
+        v2_execution_plan(ir_v2, &ws, &run_id, &base_commit).unwrap_or_else(|error| {
+            eprintln!("prepare IR v2 execution: {error}");
+            std::process::exit(1);
+        })
+    });
     if durability == "local" {
         let durability_dir = arg(&args, "--durability-dir")
             .map(std::path::PathBuf::from)
@@ -913,6 +1485,7 @@ fn main() {
             &run_digest,
             &targets,
             arg(&args, "--durable-run-id").as_deref(),
+            v2_plan,
         )
         .unwrap_or_else(|error| {
             eprintln!("durable build failed: {error}");

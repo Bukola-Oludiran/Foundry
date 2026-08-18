@@ -1,0 +1,161 @@
+{
+  "ir_version": 2,
+  "spec": {
+    "name": "service-stack",
+    "description": "IR v2 contract fixture with a package, PostgreSQL, and payments integration.",
+    "language": "typescript"
+  },
+  "root": "service-stack",
+  "nodes": [
+    {
+      "id": "service-stack",
+      "kind": "integrator",
+      "owner": null,
+      "provides": {
+        "name": "Service",
+        "operations": [
+          { "name": "start", "signature": "start() -> status" }
+        ],
+        "types": []
+      },
+      "requires": [
+        { "node": "api", "interface": "Api", "operations": ["health"] }
+      ],
+      "implementation": {
+        "children": ["api"],
+        "write_target": "src/service.ts",
+        "composition": "Expose the API health contract."
+      },
+      "acceptance": {
+        "mandate_owner": "spec",
+        "language": "typescript",
+        "cases": [
+          { "name": "starts", "call": "start()", "expect": "ready" }
+        ],
+        "properties": []
+      }
+    },
+    {
+      "id": "api",
+      "kind": "leaf",
+      "owner": "service-stack",
+      "provides": {
+        "name": "Api",
+        "operations": [
+          { "name": "health", "signature": "health() -> status" }
+        ],
+        "types": []
+      },
+      "requires": [],
+      "implementation": {
+        "language": "typescript",
+        "write_target": "src/api.ts",
+        "entrypoint": "src/api.ts"
+      },
+      "acceptance": {
+        "mandate_owner": "service-stack",
+        "language": "typescript",
+        "cases": [
+          { "name": "healthy", "call": "health()", "expect": "ok" }
+        ],
+        "properties": []
+      }
+    }
+  ],
+  "package_roots": [
+    {
+      "id": "node-workspace",
+      "language": "typescript",
+      "manifest_path": "package.json",
+      "lockfile_path": "package-lock.json",
+      "resolver": { "mode": "locked", "allow_prereleases": false },
+      "workspace_members": ["src"],
+      "registry_allowlist": ["https://registry.npmjs.org"]
+    }
+  ],
+  "packages": [
+    {
+      "id": "json-codec",
+      "ecosystem": "npm",
+      "name": "fast-json-stable-stringify",
+      "version": "2.1.0",
+      "integrity": "sha512-correctfixtureintegrity",
+      "scope": "runtime",
+      "owner_node": "api",
+      "package_root": "node-workspace",
+      "features": [],
+      "extras": []
+    }
+  ],
+  "resources": [
+    {
+      "id": "primary-db",
+      "kind": "postgresql",
+      "version": "17.2",
+      "configuration": { "database": "service" },
+      "migration_owner": "api",
+      "migration_path": "migrations",
+      "require_repeatable_migrations": true
+    }
+  ],
+  "resource_bindings": [
+    {
+      "resource": "primary-db",
+      "node": "api",
+      "permissions": ["read", "write", "admin"],
+      "environment": { "url": "DATABASE_URL" }
+    }
+  ],
+  "integrations": [
+    {
+      "id": "payments",
+      "kind": "stripe",
+      "operations": ["create-payment"],
+      "contract_path": "contracts/payments.json",
+      "sensitive_fields": ["authorization"]
+    }
+  ],
+  "integration_bindings": [
+    {
+      "integration": "payments",
+      "node": "api",
+      "operations": ["create-payment"],
+      "secret_ref": "stripe-key",
+      "timeout_ms": 3000,
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 100,
+        "max_backoff_ms": 1000
+      },
+      "rate_limit": { "requests": 10, "per_seconds": 1 },
+      "idempotency": true
+    }
+  ],
+  "secret_refs": [
+    {
+      "id": "stripe-key",
+      "provider": "environment",
+      "name": "STRIPE_API_KEY"
+    }
+  ],
+  "test_environments": [
+    {
+      "node": "api",
+      "resources": ["primary-db"],
+      "integrations": ["payments"],
+      "fixtures": { "account": { "id": "fixture-account" } },
+      "database_seeds": [
+        { "resource": "primary-db", "fixture": { "table": "accounts", "rows": [] } }
+      ],
+      "integration_expectations": [
+        {
+          "integration": "payments",
+          "operation": "create-payment",
+          "request": { "amount": 1000 },
+          "response": { "status": "accepted" }
+        }
+      ],
+      "verify_migrations": ["primary-db"]
+    }
+  ]
+}

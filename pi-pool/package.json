@@ -10,6 +10,11 @@
     "typecheck": "tsc --noEmit",
     "validate:ir": "node scripts/validate-ir.ts",
     "validate:languages": "node scripts/validate-language-backends.ts",
+    "validate:evidence": "node scripts/validate-evidence.ts",
+    "validate:dependency-resolution": "node scripts/validate-dependency-resolution.ts",
+    "validate:environment-manager": "node scripts/validate-environment-manager.ts",
+    "validate:package-backends": "node scripts/validate-package-backends.ts",
+    "validate:project-runner": "node scripts/validate-project-runner.ts",
     "validate:doer-tools": "node scripts/validate-doer-tools.ts",
     "validate:runner-gen": "node scripts/validate-runner-gen.ts",
     "validate:sandbox": "node scripts/validate-sandbox.ts",
@@ -18,14 +23,17 @@
     "validate:server": "node scripts/validate-server.ts",
     "validate:security": "node scripts/validate-worker-security.ts",
     "validate:worker-restart": "node scripts/validate-worker-restart.ts",
+    "validate:v2-server": "node scripts/validate-v2-server.ts",
+    "validate:worker-v2": "node scripts/validate-worker-v2.ts",
     "validate:durable-restart": "node scripts/validate-durable-restart.ts",
     "validate:oci": "node scripts/validate-oci-sandbox.ts",
-    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:doer-tools && npm run validate:architect && npm run validate:security && npm run validate:worker-restart",
+    "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:evidence && npm run validate:dependency-resolution && npm run validate:package-backends && npm run validate:environment-manager && npm run validate:project-runner && npm run validate:worker-v2 && npm run validate:doer-tools && npm run validate:architect && npm run validate:security && npm run validate:worker-restart && npm run validate:v2-server",
     "test:local": "npm test && npm run validate:sandbox && npm run validate:build && npm run validate:server"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.84.2",
-    "ajv": "8.20.0"
+    "ajv": "8.20.0",
+    "typescript-legacy": "npm:typescript@5.9.3"
   },
   "devDependencies": {
     "@types/node": "26.2.0",

@@ -21,8 +21,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use foundry_ir::{
-    ArchitectureLayoutV1, ArchitectureRequest, CriticVerdictV1, Ir, ProposalStatusV1,
-    RationaleEntryV1, StudioBindingV1, StudioCommandV1, StudioOperationV1, StudioRationaleV1,
+    ArchitectureLayoutV1, ArchitectureRequest, CriticVerdictV1, EvidenceCompletenessV1, Ir,
+    NodeImplementationEvidenceV1, ProposalStatusV1, RationaleEntryV1, StudioBindingV1,
+    StudioCommandV1, StudioOperationV1, StudioRationaleV1,
 };
 use graphreact_persistence::RunId;
 use nostr::hashes::{sha256, Hash};
@@ -4098,6 +4099,9 @@ async fn build(
         .args(["--studio-rationale", &rationale_path.to_string_lossy()])
         .args(["--studio-layout", &layout_path.to_string_lossy()])
         .args(["--studio-locks", &locks_path.to_string_lossy()])
+        .args(["--studio-proposal-id", &handoff.proposal_id])
+        .args(["--studio-revision-id", &handoff.revision_id])
+        .args(["--studio-semantic-digest", &handoff.semantic_digest])
         .env_remove("FOUNDRY_STUDIO_SERVICE_NSEC")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -4229,6 +4233,104 @@ async fn download_build_artifact(
     })?;
     response.headers_mut().insert("content-type", content_type);
     Ok(response)
+}
+
+async fn get_node_implementation_evidence(
+    State(state): State<Arc<ServiceState>>,
+    Path((build_run_id, node_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (studio_state, handoff) = studio::find_build_handoff(&state.durability_dir, &build_run_id)?;
+    capability(
+        &state,
+        &headers,
+        &studio_state.binding.repository_coordinate,
+        "read",
+    )?;
+    let build_directory = state.durability_dir.join("build-runs").join(&build_run_id);
+    let status = crate::durable::run_status(&build_directory, &build_run_id)
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, "BUILD_NOT_GREEN", error))?;
+    if status != graphreact_persistence::RunStatus::Succeeded {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "BUILD_NOT_GREEN",
+            format!("build `{build_run_id}` is {status:?}"),
+        ));
+    }
+    let artifacts =
+        crate::durable::run_artifacts(&build_directory, &build_run_id).map_err(|error| {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "SERVICE_NOT_READY", error)
+        })?;
+    let prefix = format!("{node_id}-evidence-");
+    let artifact = artifacts
+        .into_iter()
+        .filter(|artifact| {
+            artifact.logical_name.starts_with(&prefix)
+                && artifact.logical_name.ends_with(".json")
+                && artifact.media_type
+                    == "application/vnd.foundry.node-implementation-evidence.v1+json"
+        })
+        .max_by_key(|artifact| artifact.created_at_ms)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "EVIDENCE_NOT_AVAILABLE",
+                format!("node `{node_id}` has no accepted implementation evidence"),
+            )
+        })?;
+    let (metadata, bytes) =
+        crate::durable::read_run_artifact(&build_directory, &build_run_id, artifact.id.as_str())
+            .map_err(|error| {
+                ApiError::new(StatusCode::NOT_FOUND, "EVIDENCE_NOT_AVAILABLE", error)
+            })?;
+    let actual_sha: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+    if actual_sha != metadata.sha256 {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_NOT_READY",
+            "implementation evidence checksum verification failed",
+        ));
+    }
+    let evidence: NodeImplementationEvidenceV1 =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_NOT_READY",
+                format!("implementation evidence is malformed: {error}"),
+            )
+        })?;
+    evidence.validate_shape().map_err(|message| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_NOT_READY",
+            message,
+        )
+    })?;
+    let matches_handoff = evidence.evidence_version == 1
+        && evidence.node_id == node_id
+        && evidence.build_run_id == build_run_id
+        && evidence.proposal_id.as_deref() == Some(handoff.proposal_id.as_str())
+        && evidence.revision_id.as_deref() == Some(handoff.revision_id.as_str())
+        && evidence.semantic_digest == handoff.semantic_digest
+        && evidence.base_commit == handoff.base_commit;
+    if !matches_handoff {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "REVISION_MISMATCH",
+            "implementation evidence does not match the immutable build handoff",
+        ));
+    }
+    let evidence_status = if evidence.completeness == EvidenceCompletenessV1::Partial {
+        "EVIDENCE_PARTIAL"
+    } else {
+        "complete"
+    };
+    Ok(Json(json!({
+        "protocol_version": 1,
+        "status": evidence_status,
+        "artifact": metadata,
+        "evidence": evidence,
+    })))
 }
 
 async fn stream_build(
@@ -4503,6 +4605,10 @@ pub fn serve(args: &[String]) -> Result<(), String> {
         .route(
             "/v1/studio-builds/{build_run_id}/artifacts/{artifact_id}",
             get(download_build_artifact),
+        )
+        .route(
+            "/v1/studio-builds/{build_run_id}/nodes/{node_id}/evidence",
+            get(get_node_implementation_evidence),
         )
         .route("/v1/studio-builds/{build_run_id}/events", get(stream_build))
         .layer(DefaultBodyLimit::max(max_body_bytes))

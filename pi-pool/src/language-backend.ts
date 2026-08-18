@@ -1,4 +1,5 @@
-import type { TestCase } from "./contract.ts";
+import type { EvidenceSymbolV1, TestCase } from "./contract.ts";
+import { goSymbols, pythonSymbols, typeScriptSymbols } from "./evidence.ts";
 import {
   generateGoRunner,
   generatePythonRunner,
@@ -18,6 +19,11 @@ export interface LanguageBackend {
   generateRunner(input: GenInput): string;
   localCommand(files: string[]): { command: string; args: string[] };
   validateCases(cases: TestCase[]): void;
+  extractSymbols(
+    path: string,
+    absolutePath: string,
+    content: string,
+  ): EvidenceSymbolV1[];
 }
 
 const ensureCalls = (language: string, cases: TestCase[]): void => {
@@ -42,6 +48,7 @@ const BACKENDS: Record<SupportedLanguage, LanguageBackend> = {
     generateRunner: generatePythonRunner,
     localCommand: () => ({ command: "python3", args: ["__runner.py"] }),
     validateCases: (cases) => ensureCalls("python", cases),
+    extractSymbols: pythonSymbols,
   },
   typescript: {
     language: "typescript",
@@ -54,6 +61,7 @@ const BACKENDS: Record<SupportedLanguage, LanguageBackend> = {
     generateRunner: generateTypeScriptRunner,
     localCommand: () => ({ command: process.execPath, args: ["__runner.ts"] }),
     validateCases: (cases) => ensureCalls("typescript", cases),
+    extractSymbols: typeScriptSymbols,
   },
   go: {
     language: "go",
@@ -66,6 +74,7 @@ const BACKENDS: Record<SupportedLanguage, LanguageBackend> = {
     generateRunner: generateGoRunner,
     localCommand: (files) => ({ command: "go", args: ["run", ...files] }),
     validateCases: (cases) => ensureCalls("go", cases),
+    extractSymbols: goSymbols,
   },
 };
 

@@ -479,6 +479,9 @@ fn default_layout() -> ArchitectureLayoutV1 {
         positions: BTreeMap::new(),
         collapsed: Default::default(),
         selected_view: "component".into(),
+        selected_element: None,
+        inspector_section: None,
+        show_internal_evidence: false,
         zoom: 1.0,
         viewport: LayoutPointV1 { x: 0.0, y: 0.0 },
     }

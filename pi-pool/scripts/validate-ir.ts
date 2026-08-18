@@ -3,12 +3,14 @@ import { readFileSync, readdirSync } from "node:fs";
 import { basename } from "node:path";
 
 const schemaUrl = new URL("../../ir/schema.json", import.meta.url);
+const schemaV2Url = new URL("../../ir/schema-v2.json", import.meta.url);
 const architectureSchemaUrl = new URL(
   "../../ir/architecture-request.schema.json",
   import.meta.url,
 );
 const examplesUrl = new URL("../../ir/examples/", import.meta.url);
 const schema = JSON.parse(readFileSync(schemaUrl, "utf8")) as object;
+const schemaV2 = JSON.parse(readFileSync(schemaV2Url, "utf8")) as object;
 // Ajv publishes CJS-shaped NodeNext declarations; the runtime default is constructable.
 // @ts-expect-error -- upstream Ajv NodeNext declaration mismatch
 const ajv = new Ajv2020({
@@ -17,7 +19,11 @@ const ajv = new Ajv2020({
   strictRequired: false,
 });
 ajv.addSchema(schema);
-const validate = ajv.getSchema("https://foundry.local/schema/dyad-ir.json")!;
+ajv.addSchema(schemaV2);
+const validateV1 = ajv.getSchema("https://foundry.local/schema/dyad-ir.json")!;
+const validateV2 = ajv.getSchema(
+  "https://foundry.local/schema/dyad-ir-v2.json",
+)!;
 const validateArchitecture = ajv.compile(
   JSON.parse(readFileSync(architectureSchemaUrl, "utf8")) as object,
 );
@@ -28,6 +34,11 @@ for (const name of readdirSync(examplesUrl)
   .sort()) {
   const url = new URL(name, examplesUrl);
   const value = JSON.parse(readFileSync(url, "utf8")) as unknown;
+  const version =
+    typeof value === "object" && value !== null && "ir_version" in value
+      ? (value as { ir_version?: unknown }).ir_version
+      : undefined;
+  const validate = version === 2 ? validateV2 : validateV1;
   if (validate(value)) {
     console.log(`VALID ${basename(name)}`);
   } else {

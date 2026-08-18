@@ -4,9 +4,16 @@
 // (prod) — Piston lays all files flat in one dir, matching the local temp-dir layout, so
 // the verdict is identical. Black-box: reads only the built module + its declared deps.
 
-import type { TestRequest, TestResult, Failure } from "./contract.ts";
+import type {
+  AcceptanceCaseResultV1,
+  TestRequest,
+  TestRequestV2,
+  TestResult,
+  Failure,
+} from "./contract.ts";
 import { parseVerdict } from "./runner-gen.ts";
 import { languageBackend, type LanguageBackend } from "./language-backend.ts";
+import { extractImplementationEvidence } from "./evidence.ts";
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -27,12 +34,44 @@ interface PFile {
   content: string;
 }
 
-type TestResultCore = Omit<TestResult, "artifact">;
+type TestResultCore = Omit<
+  TestResult,
+  "artifact" | "implementation_evidence" | "case_results"
+>;
 
-function withArtifact(result: TestResultCore): TestResult {
-  const encoded = Buffer.from(JSON.stringify(result));
-  return {
+function withArtifact(
+  req: TestRequest | TestRequestV2,
+  result: TestResultCore,
+): TestResult {
+  const failures = new Map(
+    result.failures.map((failure) => [failure.case, failure]),
+  );
+  const caseResults: AcceptanceCaseResultV1[] = req.acceptance.cases.map(
+    (testCase) => ({
+      name: testCase.name,
+      status:
+        result.failure_code === "EXECUTION_FAILED" ||
+        result.failure_code === "PISTON_FAILED"
+          ? "not_run"
+          : failures.has(testCase.name)
+            ? "failed"
+            : "passed",
+      failure: failures.get(testCase.name) ?? null,
+    }),
+  );
+  const complete = {
     ...result,
+    case_results: caseResults,
+    implementation_evidence: extractImplementationEvidence(
+      req,
+      caseResults,
+      languageBackend(req.language),
+      result.measurements,
+    ),
+  };
+  const encoded = Buffer.from(JSON.stringify(complete));
+  return {
+    ...complete,
     artifact: {
       sha256: createHash("sha256").update(encoded).digest("hex"),
       size: encoded.byteLength,
@@ -42,7 +81,10 @@ function withArtifact(result: TestResultCore): TestResult {
 }
 
 /** Flatten module-under-test + deps + generated runner (runner is files[0] = the main file). */
-function assembleFiles(req: TestRequest, backend: LanguageBackend): PFile[] {
+function assembleFiles(
+  req: TestRequest | TestRequestV2,
+  backend: LanguageBackend,
+): PFile[] {
   const moduleName = sanitize(req.node_id);
   backend.validateCases(req.acceptance.cases);
   const runner = backend.generateRunner({
@@ -66,9 +108,10 @@ function assembleFiles(req: TestRequest, backend: LanguageBackend): PFile[] {
 
 /** Map a run's stdout (+ raw stage) to a verdict — shared by both executors. */
 function toResult(
-  nodeId: string,
+  req: TestRequest | TestRequestV2,
   stdout: string,
   piston: TestResult["piston"],
+  durationMs: number,
 ): TestResult {
   const v = parseVerdict(stdout);
   if (!v) {
@@ -80,18 +123,19 @@ function toResult(
         (piston.stderr || "").trim().slice(0, 400) ||
         `no verdict (exit ${piston.code})`,
     };
-    return withArtifact({
-      node_id: nodeId,
+    return withArtifact(req, {
+      node_id: req.node_id,
       verdict: "red",
       passed: 0,
       failed: 1,
       failures: [err],
       failure_code: "EXECUTION_FAILED",
+      measurements: { duration_ms: durationMs, memory_mb: null },
       piston,
     });
   }
-  return withArtifact({
-    node_id: nodeId,
+  return withArtifact(req, {
+    node_id: req.node_id,
     verdict: v.failed === 0 ? "green" : "red",
     passed: v.passed,
     failed: v.failed,
@@ -102,12 +146,13 @@ function toResult(
       error: f.error,
     })),
     failure_code: v.failed === 0 ? null : "ACCEPTANCE_FAILED",
+    measurements: { duration_ms: durationMs, memory_mb: null },
     piston,
   });
 }
 
 function runLocal(
-  req: TestRequest,
+  req: TestRequest | TestRequestV2,
   files: PFile[],
   backend: LanguageBackend,
 ): TestResult {
@@ -115,6 +160,7 @@ function runLocal(
   try {
     for (const f of files) writeFileSync(join(dir, f.name), f.content);
     const invocation = backend.localCommand(files.map((file) => file.name));
+    const startedAt = performance.now();
     const proc = spawnSync(invocation.command, invocation.args, {
       cwd: dir,
       encoding: "utf-8",
@@ -123,12 +169,17 @@ function runLocal(
         (req.acceptance.perf?.time_ms ?? 3000) + 2000,
       ),
     });
-    return toResult(req.node_id, proc.stdout ?? "", {
-      code: proc.status ?? -1,
-      signal: proc.signal ?? null,
-      stdout: proc.stdout ?? "",
-      stderr: proc.stderr ?? "",
-    });
+    return toResult(
+      req,
+      proc.stdout ?? "",
+      {
+        code: proc.status ?? -1,
+        signal: proc.signal ?? null,
+        stdout: proc.stdout ?? "",
+        stderr: proc.stderr ?? "",
+      },
+      Math.max(0, Math.round(performance.now() - startedAt)),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -158,7 +209,7 @@ async function resolvePistonVersion(
 }
 
 async function runOnPiston(
-  req: TestRequest,
+  req: TestRequest | TestRequestV2,
   files: PFile[],
   url: string,
 ): Promise<TestResult> {
@@ -178,6 +229,7 @@ async function runOnPiston(
         req.acceptance.perf?.mem_mb ?? req.resource_policy.memory_mb,
       ) * 1_000_000,
   };
+  const startedAt = performance.now();
   const resp = await fetch(`${url}/api/v2/execute`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -199,13 +251,17 @@ async function runOnPiston(
       actual: null,
       error: data.message ?? "piston: no run stage",
     };
-    return withArtifact({
+    return withArtifact(req, {
       node_id: req.node_id,
       verdict: "red",
       passed: 0,
       failed: 1,
       failures: [err],
       failure_code: "PISTON_FAILED",
+      measurements: {
+        duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+        memory_mb: null,
+      },
       piston: {
         code: -1,
         signal: null,
@@ -215,16 +271,21 @@ async function runOnPiston(
     });
   }
   const run = data.run;
-  return toResult(req.node_id, run.stdout ?? "", {
-    code: run.code,
-    signal: run.signal,
-    stdout: run.stdout ?? "",
-    stderr: run.stderr ?? "",
-  });
+  return toResult(
+    req,
+    run.stdout ?? "",
+    {
+      code: run.code,
+      signal: run.signal,
+      stdout: run.stdout ?? "",
+      stderr: run.stderr ?? "",
+    },
+    Math.max(0, Math.round(performance.now() - startedAt)),
+  );
 }
 
 export async function executeTest(
-  req: TestRequest,
+  req: TestRequest | TestRequestV2,
   cfg: TesterConfig = { mode: "local" },
 ): Promise<TestResult> {
   const backend = languageBackend(req.language);

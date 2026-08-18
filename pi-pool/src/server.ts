@@ -31,10 +31,33 @@ import { StubLlm, PiAiLlm, type LlmClient } from "./llm.ts";
 import {
   validateBuildRequest,
   validateArchitectureRequest,
+  validateApplyMigrationsRequest,
+  validateEnvironmentActionRequest,
+  validateResolveDependenciesRequest,
+  validateStartEnvironmentRequest,
   validateTestRequest,
   RequestError,
 } from "./validation.ts";
 import { sandboxAvailability } from "./sandbox.ts";
+import {
+  type DependencyResolver,
+  OciDependencyResolver,
+  verifyDependencyResolutionResult,
+} from "./dependency-resolver.ts";
+import {
+  type EnvironmentManager,
+  HttpEnvironmentManager,
+  verifyEnvironmentHandle,
+  verifyEnvironmentHealth,
+  verifyEnvironmentSnapshot,
+  verifyEnvironmentTeardown,
+  verifyMigrationResult,
+} from "./environment-manager.ts";
+import {
+  HttpProjectRunner,
+  type ProjectRunner,
+  verifyProjectTestResult,
+} from "./project-runner.ts";
 
 function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -93,6 +116,10 @@ export interface FoundryServerOptions {
   workspaceRoot?: string;
   requireSandbox?: boolean;
   idempotencyDir?: string;
+  dependencyResolver?: DependencyResolver;
+  environmentManager?: EnvironmentManager;
+  projectRunner?: ProjectRunner;
+  requireProtocolV2?: boolean;
 }
 
 function stable(value: unknown): string {
@@ -276,12 +303,41 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
         return send(res, 200, { ok: true });
       if (req.method === "GET" && req.url === "/ready") {
         const sandbox = sandboxAvailability();
-        const ready = !opts.requireSandbox || sandbox.available;
+        const dependencyResolver = opts.dependencyResolver
+          ? ((await opts.dependencyResolver.readiness?.()) ?? {
+              ready: true,
+              reason: null,
+            })
+          : { ready: false, reason: "not configured" };
+        const environmentManager = opts.environmentManager
+          ? ((await opts.environmentManager.readiness?.()) ?? {
+              ready: true,
+              reason: null,
+            })
+          : { ready: false, reason: "not configured" };
+        const projectRunner = opts.projectRunner
+          ? ((await opts.projectRunner.readiness?.()) ?? {
+              ready: true,
+              reason: null,
+            })
+          : { ready: false, reason: "not configured" };
+        const ready =
+          (!opts.requireSandbox || sandbox.available) &&
+          (!opts.requireProtocolV2 ||
+            (dependencyResolver.ready &&
+              environmentManager.ready &&
+              projectRunner.ready));
         return send(res, ready ? 200 : 503, {
           ready,
           authenticated: Boolean(opts.authToken),
           workspace_root: Boolean(opts.workspaceRoot),
           sandbox,
+          protocol_v2: {
+            required: Boolean(opts.requireProtocolV2),
+            dependency_resolver: dependencyResolver,
+            environment_manager: environmentManager,
+            project_runner: projectRunner,
+          },
         });
       }
       if (
@@ -326,6 +382,119 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
           ),
         );
       }
+      if (req.method === "POST" && req.url === "/v2/dependencies/resolve") {
+        const raw = await readJson(req, maxBodyBytes);
+        const body = validateResolveDependenciesRequest(
+          raw,
+          opts.workspaceRoot,
+        );
+        if (!opts.dependencyResolver) {
+          throw new RequestError(
+            503,
+            "RESOLVER_NOT_CONFIGURED",
+            "a pinned OCI dependency resolver is not configured",
+            true,
+          );
+        }
+        return send(
+          res,
+          200,
+          await once("dependencies:resolve", body.job_id, raw, async (signal) =>
+            verifyDependencyResolutionResult(
+              body,
+              await opts.dependencyResolver!.resolve(body, signal),
+            ),
+          ),
+        );
+      }
+      if (req.method === "POST" && req.url === "/v2/environments/start") {
+        const raw = await readJson(req, maxBodyBytes);
+        const body = validateStartEnvironmentRequest(raw);
+        const manager = opts.environmentManager;
+        if (!manager) {
+          throw new RequestError(
+            503,
+            "ENVIRONMENT_MANAGER_NOT_CONFIGURED",
+            "an isolated environment manager is not configured",
+            true,
+          );
+        }
+        return send(
+          res,
+          200,
+          await once("environments:start", body.job_id, raw, async (signal) =>
+            verifyEnvironmentHandle(body, await manager.start(body, signal)),
+          ),
+        );
+      }
+      if (req.method === "POST" && req.url === "/v2/environments/migrations") {
+        const raw = await readJson(req, maxBodyBytes);
+        const body = validateApplyMigrationsRequest(raw, opts.workspaceRoot);
+        const manager = opts.environmentManager;
+        if (!manager) {
+          throw new RequestError(
+            503,
+            "ENVIRONMENT_MANAGER_NOT_CONFIGURED",
+            "an isolated environment manager is not configured",
+            true,
+          );
+        }
+        return send(
+          res,
+          200,
+          await once(
+            "environments:migrations",
+            body.job_id,
+            raw,
+            async (signal) =>
+              verifyMigrationResult(body, await manager.migrate(body, signal)),
+          ),
+        );
+      }
+      const environmentAction = req.url?.match(
+        /^\/v2\/environments\/(health|snapshot|teardown)$/,
+      )?.[1];
+      if (req.method === "POST" && environmentAction) {
+        const raw = await readJson(req, maxBodyBytes);
+        const body = validateEnvironmentActionRequest(raw);
+        const manager = opts.environmentManager;
+        if (!manager) {
+          throw new RequestError(
+            503,
+            "ENVIRONMENT_MANAGER_NOT_CONFIGURED",
+            "an isolated environment manager is not configured",
+            true,
+          );
+        }
+        const action = async (signal: AbortSignal) => {
+          if (environmentAction === "health") {
+            return verifyEnvironmentHealth(
+              body,
+              await manager.health(body, signal),
+            );
+          }
+          if (environmentAction === "snapshot") {
+            return verifyEnvironmentSnapshot(
+              body,
+              await manager.snapshot(body, signal),
+            );
+          }
+          return verifyEnvironmentTeardown(
+            body,
+            await manager.teardown(body, signal),
+          );
+        };
+        return send(
+          res,
+          200,
+          await once(
+            `environments:${environmentAction}`,
+            body.job_id,
+            raw,
+            action,
+          ),
+        );
+      }
       if (req.method === "POST" && req.url === "/build") {
         const raw = await readJson(req, maxBodyBytes);
         const body = validateBuildRequest(raw, opts.workspaceRoot);
@@ -340,10 +509,24 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
       if (req.method === "POST" && req.url === "/test") {
         const raw = await readJson(req, maxBodyBytes);
         const body = validateTestRequest(raw, opts.workspaceRoot);
+        if (body.protocol_version === 2 && !opts.projectRunner) {
+          throw new RequestError(
+            503,
+            "PROJECT_RUNNER_NOT_CONFIGURED",
+            "a verified OCI project runner is required for protocol v2 tests",
+            true,
+          );
+        }
         return send(
           res,
           200,
-          await once("test", body.job_id, raw, () => executeTest(body, tester)),
+          await once("test", body.job_id, raw, (signal) =>
+            body.protocol_version === 2
+              ? opts
+                  .projectRunner!.test(body, signal)
+                  .then((result) => verifyProjectTestResult(body, result))
+              : executeTest(body, tester),
+          ),
         );
       }
       throw new RequestError(404, "NOT_FOUND", "route not found");
@@ -425,6 +608,49 @@ if (isMain) {
       process.env.FOUNDRY_ALLOW_INSECURE_LOCAL === "1";
     const workspaceRoot = process.env.FOUNDRY_WORKSPACE_ROOT;
     const idempotencyDir = process.env.FOUNDRY_WORKER_STATE_DIR;
+    const resolverNetwork = process.env.FOUNDRY_RESOLVER_NETWORK;
+    const resolverProxy = process.env.FOUNDRY_REGISTRY_PROXY_URL;
+    if (Boolean(resolverNetwork) !== Boolean(resolverProxy)) {
+      throw new Error(
+        "FOUNDRY_RESOLVER_NETWORK and FOUNDRY_REGISTRY_PROXY_URL must be configured together",
+      );
+    }
+    const dependencyResolver =
+      resolverNetwork && resolverProxy
+        ? new OciDependencyResolver({
+            network: resolverNetwork,
+            proxyUrl: resolverProxy,
+          })
+        : undefined;
+    const environmentManagerUrl = process.env.FOUNDRY_ENVIRONMENT_MANAGER_URL;
+    const environmentManagerToken =
+      process.env.FOUNDRY_ENVIRONMENT_MANAGER_TOKEN;
+    if (Boolean(environmentManagerUrl) !== Boolean(environmentManagerToken)) {
+      throw new Error(
+        "FOUNDRY_ENVIRONMENT_MANAGER_URL and FOUNDRY_ENVIRONMENT_MANAGER_TOKEN must be configured together",
+      );
+    }
+    const environmentManager =
+      environmentManagerUrl && environmentManagerToken
+        ? new HttpEnvironmentManager({
+            baseUrl: environmentManagerUrl,
+            token: environmentManagerToken,
+          })
+        : undefined;
+    const projectRunnerUrl = process.env.FOUNDRY_PROJECT_RUNNER_URL;
+    const projectRunnerToken = process.env.FOUNDRY_PROJECT_RUNNER_TOKEN;
+    if (Boolean(projectRunnerUrl) !== Boolean(projectRunnerToken)) {
+      throw new Error(
+        "FOUNDRY_PROJECT_RUNNER_URL and FOUNDRY_PROJECT_RUNNER_TOKEN must be configured together",
+      );
+    }
+    const projectRunner =
+      projectRunnerUrl && projectRunnerToken
+        ? new HttpProjectRunner({
+            baseUrl: projectRunnerUrl,
+            token: projectRunnerToken,
+          })
+        : undefined;
     if (!allowUnauthenticated && (!authToken || authToken.length < 32)) {
       throw new Error(
         "FOUNDRY_WORKER_TOKEN must contain at least 32 characters",
@@ -444,6 +670,10 @@ if (isMain) {
       workspaceRoot,
       requireSandbox: !allowUnauthenticated,
       idempotencyDir,
+      dependencyResolver,
+      environmentManager,
+      projectRunner,
+      requireProtocolV2: process.env.FOUNDRY_REQUIRE_PROTOCOL_V2 === "1",
     }).listen(port, "127.0.0.1", () => {
       console.log(
         `[pi-pool] listening on :${port} — LLM=${llmLabel}, tester=${tester.mode}`,

@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://foundry.local/schema/dyad-ir-v2.json",
+  "title": "Foundry Dyad IR v2",
+  "description": "IR v2 adds reproducible packages, managed test resources, secret references, and external integration contracts while retaining the v1 node model.",
+  "type": "object",
+  "required": ["ir_version", "spec", "root", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "ir_version": { "const": 2 },
+    "spec": { "$ref": "dyad-ir.json#/properties/spec" },
+    "root": { "$ref": "dyad-ir.json#/properties/root" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "dyad-ir.json#/$defs/node" }
+    },
+    "package_roots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/packageRoot" },
+      "default": []
+    },
+    "packages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/packageDependency" },
+      "default": []
+    },
+    "resources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resource" },
+      "default": []
+    },
+    "resource_bindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resourceBinding" },
+      "default": []
+    },
+    "integrations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/integration" },
+      "default": []
+    },
+    "integration_bindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/integrationBinding" },
+      "default": []
+    },
+    "secret_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/secretRef" },
+      "default": []
+    },
+    "test_environments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/testEnvironment" },
+      "default": []
+    }
+  },
+  "$defs": {
+    "safeId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "safePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\:]+$"
+    },
+    "packageRoot": {
+      "type": "object",
+      "required": ["id", "language", "manifest_path", "lockfile_path", "resolver"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "language": { "enum": ["python", "typescript", "go"] },
+        "manifest_path": { "$ref": "#/$defs/safePath" },
+        "lockfile_path": { "$ref": "#/$defs/safePath" },
+        "resolver": {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "const": "locked" },
+            "allow_prereleases": { "type": "boolean", "default": false }
+          }
+        },
+        "workspace_members": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/safePath" },
+          "default": []
+        },
+        "registry_allowlist": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^https://[^@#]+$" },
+          "default": []
+        }
+      }
+    },
+    "packageDependency": {
+      "type": "object",
+      "required": ["id", "ecosystem", "name", "version", "integrity", "scope", "owner_node", "package_root"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "ecosystem": { "enum": ["npm", "pypi", "go"] },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "integrity": { "type": "string", "pattern": "^(sha256-|sha512-|h1:).{9,}$" },
+        "scope": { "enum": ["runtime", "build", "development"] },
+        "owner_node": { "$ref": "#/$defs/safeId" },
+        "package_root": { "$ref": "#/$defs/safeId" },
+        "features": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "extras": { "type": "array", "items": { "type": "string" }, "default": [] }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "required": ["id", "kind", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "kind": { "enum": ["postgresql", "redis", "s3", "nats", "smtp", "oidc"] },
+        "version": { "type": "string", "minLength": 1 },
+        "configuration": { "type": "object", "default": {} },
+        "migration_owner": { "$ref": "#/$defs/safeId" },
+        "migration_path": { "$ref": "#/$defs/safePath" },
+        "require_repeatable_migrations": { "type": "boolean", "default": false }
+      },
+      "dependentRequired": {
+        "migration_owner": ["migration_path"],
+        "migration_path": ["migration_owner"]
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "postgresql" } } },
+          "then": { "properties": { "configuration": { "$ref": "#/$defs/postgresqlConfig" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "redis" } } },
+          "then": { "properties": { "configuration": { "$ref": "#/$defs/redisConfig" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "s3" } } },
+          "then": { "properties": { "configuration": { "$ref": "#/$defs/stringListConfigBuckets" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "nats" } } },
+          "then": { "properties": { "configuration": { "$ref": "#/$defs/stringListConfigSubjects" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "smtp" } } },
+          "then": { "properties": { "configuration": { "$ref": "#/$defs/stringListConfigInboxes" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "oidc" } } },
+          "then": { "properties": { "configuration": { "$ref": "#/$defs/oidcConfig" } } }
+        }
+      ]
+    },
+    "postgresqlConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "database": { "type": "string", "minLength": 1 } }
+    },
+    "redisConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "maxmemory_mb": { "type": "integer", "minimum": 1 } }
+    },
+    "stringListConfigBuckets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "buckets": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } } }
+    },
+    "stringListConfigSubjects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "subjects": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } } }
+    },
+    "stringListConfigInboxes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "inboxes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } } }
+    },
+    "oidcConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "realm": { "type": "string", "minLength": 1 },
+        "clients": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "resourceBinding": {
+      "type": "object",
+      "required": ["resource", "node", "permissions"],
+      "additionalProperties": false,
+      "properties": {
+        "resource": { "$ref": "#/$defs/safeId" },
+        "node": { "$ref": "#/$defs/safeId" },
+        "permissions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["read", "write", "publish", "consume", "admin"] }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "default": {}
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "required": ["id", "kind", "operations"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "kind": { "enum": ["http", "webhook", "stripe", "openai"] },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "contract_path": { "$ref": "#/$defs/safePath" },
+        "sensitive_fields": { "type": "array", "items": { "type": "string" }, "default": [] }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "required": ["max_attempts", "initial_backoff_ms", "max_backoff_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "initial_backoff_ms": { "type": "integer", "minimum": 1 },
+        "max_backoff_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rateLimit": {
+      "type": "object",
+      "required": ["requests", "per_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "type": "integer", "minimum": 1 },
+        "per_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "integrationBinding": {
+      "type": "object",
+      "required": ["integration", "node", "operations", "timeout_ms", "retry", "idempotency"],
+      "additionalProperties": false,
+      "properties": {
+        "integration": { "$ref": "#/$defs/safeId" },
+        "node": { "$ref": "#/$defs/safeId" },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "secret_ref": { "$ref": "#/$defs/safeId" },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "retry": { "$ref": "#/$defs/retry" },
+        "rate_limit": { "$ref": "#/$defs/rateLimit" },
+        "idempotency": { "type": "boolean" }
+      }
+    },
+    "secretRef": {
+      "type": "object",
+      "required": ["id", "provider", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "provider": { "enum": ["environment", "workload_identity", "operator"] },
+        "name": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "databaseSeed": {
+      "type": "object",
+      "required": ["resource", "fixture"],
+      "additionalProperties": false,
+      "properties": {
+        "resource": { "$ref": "#/$defs/safeId" },
+        "fixture": {}
+      }
+    },
+    "integrationExpectation": {
+      "type": "object",
+      "required": ["integration", "operation", "request", "response"],
+      "additionalProperties": false,
+      "properties": {
+        "integration": { "$ref": "#/$defs/safeId" },
+        "operation": { "type": "string", "minLength": 1 },
+        "request": {},
+        "response": {}
+      }
+    },
+    "testEnvironment": {
+      "type": "object",
+      "required": ["node"],
+      "additionalProperties": false,
+      "properties": {
+        "node": { "$ref": "#/$defs/safeId" },
+        "resources": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/safeId" }, "default": [] },
+        "integrations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/safeId" }, "default": [] },
+        "fixtures": { "type": "object", "default": {} },
+        "database_seeds": { "type": "array", "items": { "$ref": "#/$defs/databaseSeed" }, "default": [] },
+        "integration_expectations": { "type": "array", "items": { "$ref": "#/$defs/integrationExpectation" }, "default": [] },
+        "verify_migrations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/safeId" }, "default": [] }
+      }
+    }
+  }
+}

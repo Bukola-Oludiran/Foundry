@@ -1,6 +1,6 @@
 import { createFoundryServer } from "../src/server.ts";
 import { StubLlm } from "../src/llm.ts";
-import type { TestRequest } from "../src/contract.ts";
+import type { TestRequest, TestRequestV2 } from "../src/contract.ts";
 import { fixtureContext } from "./context.ts";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +30,14 @@ const request: TestRequest = {
     cases: [{ name: "double", call: "double(21)", expect: 42 }],
   },
   deps: [],
+};
+const v2Request: TestRequestV2 = {
+  ...request,
+  protocol_version: 2,
+  job_id: "security:test:v2",
+  dependency_layer: null,
+  test_environment: null,
+  migration_phase: "not_required",
 };
 
 const server = createFoundryServer({
@@ -89,6 +97,9 @@ try {
     post({ ...request, write_target: "../escape.py" }),
   );
   await expect("accepts authenticated request", 200, () => post(request));
+  await expect("rejects v2 test fallback without OCI project runner", 503, () =>
+    post(v2Request),
+  );
   await expect("replays identical job", 200, () => post(request));
   await expect("rejects changed idempotent job", 409, () =>
     post({

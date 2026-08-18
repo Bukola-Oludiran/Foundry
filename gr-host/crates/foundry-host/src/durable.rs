@@ -28,6 +28,16 @@ use crate::http::http_post_json;
 use crate::{BuildPlan, Ir, Job, MAX_RETRIES};
 
 const FENCING_TOKEN: u64 = 1;
+const V2_PREFLIGHT_NODE: &str = "__foundry_v2_preflight";
+
+#[derive(Debug, Clone)]
+pub struct V2ExecutionPlan {
+    pub dependency_request: Option<Value>,
+    pub environment_start_request: Option<Value>,
+    pub migrations: Value,
+    pub workspace: String,
+    pub node_bindings: BTreeMap<String, Value>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagerDecision {
@@ -76,6 +86,12 @@ impl DurableEffectAdapter for WorkerEffectAdapter {
             let path = match operation {
                 "build" => "/build",
                 "test" => "/test",
+                "resolve_dependencies" => "/v2/dependencies/resolve",
+                "environment_start" => "/v2/environments/start",
+                "environment_health" => "/v2/environments/health",
+                "environment_migrations" => "/v2/environments/migrations",
+                "environment_snapshot" => "/v2/environments/snapshot",
+                "environment_teardown" => "/v2/environments/teardown",
                 other => {
                     return Err(EffectAdapterError::Operation {
                         operation: other.to_owned(),
@@ -151,6 +167,446 @@ fn retry_or_fail(
     }
 }
 
+fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
+    NodeDefinition::new("FoundryV2Preflight", move |_ctx: &NodeContext| {
+        let phase = use_durable_state("phase", json!("pending"));
+        let failure = use_durable_state("failure", Value::Null);
+        let dependency_result = use_durable_state("dependency_result", Value::Null);
+        let environment_handle = use_durable_state("environment_handle", Value::Null);
+        let environment_snapshot = use_durable_state("environment_snapshot", Value::Null);
+        let effect = use_durable_effect();
+        let artifact = use_durable_artifact();
+
+        let prepare_plan = plan.clone();
+        let prepare_effect = effect.clone();
+        use_message("prepare", move |_message| {
+            if phase.get().as_str() != Some("pending") {
+                return;
+            }
+            let request = prepare_plan
+                .dependency_request
+                .clone()
+                .or_else(|| prepare_plan.environment_start_request.clone());
+            let Some(request) = request else {
+                phase.set(json!("ready"));
+                return;
+            };
+            let resolving = prepare_plan.dependency_request.is_some();
+            let (key, operation, result_type, error_type) = if resolving {
+                (
+                    "dependency-resolution",
+                    "resolve_dependencies",
+                    "dependency_result",
+                    "dependency_error",
+                )
+            } else {
+                (
+                    "environment-start",
+                    "environment_start",
+                    "environment_start_result",
+                    "environment_start_error",
+                )
+            };
+            match prepare_effect(DurableEffectRequest {
+                key: key.into(),
+                adapter: "foundry-worker".into(),
+                operation: operation.into(),
+                input: request,
+                result_type: result_type.into(),
+                error_type: error_type.into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!(if resolving {
+                    "resolving_dependencies"
+                } else {
+                    "starting_environment"
+                })),
+                Err(error) => {
+                    failure.set(json!({"phase": operation, "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+
+        let dependency_plan = plan.clone();
+        let dependency_effect = effect.clone();
+        let dependency_artifact = artifact.clone();
+        use_message("dependency_result", move |message| {
+            if message.payload.get("ok").and_then(Value::as_bool) != Some(true) {
+                failure.set(message.payload.clone());
+                phase.set(json!("failed"));
+                return;
+            }
+            let bytes = serde_json::to_vec(&message.payload).unwrap_or_default();
+            if let Err(error) = dependency_artifact(DurableArtifactRequest {
+                logical_name: "dependency-resolution.json".into(),
+                media_type: "application/vnd.foundry.dependency-resolution.v1+json".into(),
+                bytes,
+            }) {
+                failure.set(json!({"phase": "dependency_artifact", "error": error.to_string()}));
+                phase.set(json!("failed"));
+                return;
+            }
+            dependency_result.set(message.payload.clone());
+            let Some(request) = dependency_plan.environment_start_request.clone() else {
+                phase.set(json!("ready"));
+                return;
+            };
+            match dependency_effect(DurableEffectRequest {
+                key: "environment-start".into(),
+                adapter: "foundry-worker".into(),
+                operation: "environment_start".into(),
+                input: request,
+                result_type: "environment_start_result".into(),
+                error_type: "environment_start_error".into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!("starting_environment")),
+                Err(error) => {
+                    failure.set(json!({"phase": "environment_start", "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+
+        let health_effect = effect.clone();
+        use_message("environment_start_result", move |message| {
+            let Some(environment_id) = message
+                .payload
+                .get("environment_id")
+                .and_then(Value::as_str)
+            else {
+                failure.set(json!({"phase": "environment_start", "error": "environment handle omitted its identity"}));
+                phase.set(json!("failed"));
+                return;
+            };
+            let Some(plan_digest) = message.payload.get("plan_digest").and_then(Value::as_str)
+            else {
+                failure.set(json!({"phase": "environment_start", "error": "environment handle omitted its plan digest"}));
+                phase.set(json!("failed"));
+                return;
+            };
+            environment_handle.set(message.payload.clone());
+            let input = json!({
+                "protocol_version": 2,
+                "run_id": message.run_id,
+                "environment_id": environment_id,
+                "plan_digest": plan_digest,
+            });
+            match health_effect(DurableEffectRequest {
+                key: "environment-health".into(),
+                adapter: "foundry-worker".into(),
+                operation: "environment_health".into(),
+                input,
+                result_type: "environment_health_result".into(),
+                error_type: "environment_health_error".into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!("checking_environment")),
+                Err(error) => {
+                    failure.set(json!({"phase": "environment_health", "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+
+        let migration_plan = plan.clone();
+        let post_health_effect = effect.clone();
+        use_message("environment_health_result", move |message| {
+            if message.payload.get("healthy").and_then(Value::as_bool) != Some(true) {
+                failure.set(message.payload.clone());
+                phase.set(json!("failed"));
+                return;
+            }
+            let handle = environment_handle.get();
+            let mut input = json!({
+                "protocol_version": 2,
+                "run_id": message.run_id,
+                "environment_id": handle.get("environment_id"),
+                "plan_digest": handle.get("plan_digest"),
+            });
+            let has_migrations = migration_plan
+                .migrations
+                .as_array()
+                .is_some_and(|migrations| !migrations.is_empty());
+            let (key, operation, result_type, error_type) = if has_migrations {
+                input["workspace"] = json!(migration_plan.workspace);
+                input["migrations"] = migration_plan.migrations.clone();
+                (
+                    "environment-migrations",
+                    "environment_migrations",
+                    "environment_migrations_result",
+                    "environment_migrations_error",
+                )
+            } else {
+                (
+                    "environment-snapshot",
+                    "environment_snapshot",
+                    "environment_snapshot_result",
+                    "environment_snapshot_error",
+                )
+            };
+            match post_health_effect(DurableEffectRequest {
+                key: key.into(),
+                adapter: "foundry-worker".into(),
+                operation: operation.into(),
+                input,
+                result_type: result_type.into(),
+                error_type: error_type.into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!(if has_migrations {
+                    "migrating"
+                } else {
+                    "snapshotting_environment"
+                })),
+                Err(error) => {
+                    failure.set(json!({"phase": operation, "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+
+        let snapshot_effect = effect.clone();
+        let migration_artifact = artifact.clone();
+        use_message("environment_migrations_result", move |message| {
+            if message.payload.get("green").and_then(Value::as_bool) != Some(true) {
+                failure.set(message.payload.clone());
+                phase.set(json!("failed"));
+                return;
+            }
+            let _ = migration_artifact(DurableArtifactRequest {
+                logical_name: "migration-results.json".into(),
+                media_type: "application/vnd.foundry.migration-results.v1+json".into(),
+                bytes: serde_json::to_vec(&message.payload).unwrap_or_default(),
+            });
+            let handle = environment_handle.get();
+            let input = json!({
+                "protocol_version": 2,
+                "run_id": message.run_id,
+                "environment_id": handle.get("environment_id"),
+                "plan_digest": handle.get("plan_digest"),
+            });
+            match snapshot_effect(DurableEffectRequest {
+                key: "environment-snapshot".into(),
+                adapter: "foundry-worker".into(),
+                operation: "environment_snapshot".into(),
+                input,
+                result_type: "environment_snapshot_result".into(),
+                error_type: "environment_snapshot_error".into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!("snapshotting_environment")),
+                Err(error) => {
+                    failure
+                        .set(json!({"phase": "environment_snapshot", "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+
+        let snapshot_artifact = artifact.clone();
+        use_message("environment_snapshot_result", move |message| {
+            if message
+                .payload
+                .get("snapshot_digest")
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                failure.set(
+                    json!({"phase": "environment_snapshot", "error": "snapshot digest is missing"}),
+                );
+                phase.set(json!("failed"));
+                return;
+            }
+            let _ = snapshot_artifact(DurableArtifactRequest {
+                logical_name: "environment-snapshot.json".into(),
+                media_type: "application/vnd.foundry.environment-snapshot.v1+json".into(),
+                bytes: serde_json::to_vec(&message.payload).unwrap_or_default(),
+            });
+            environment_snapshot.set(message.payload.clone());
+            phase.set(json!("ready"));
+        });
+
+        for message_type in [
+            "dependency_error",
+            "environment_start_error",
+            "environment_health_error",
+            "environment_migrations_error",
+            "environment_snapshot_error",
+        ] {
+            use_message(message_type, move |message| {
+                failure.set(message.payload.clone());
+                phase.set(json!("failed"));
+            });
+        }
+        use_message("environment_teardown_error", move |message| {
+            failure.set(message.payload.clone());
+            phase.set(json!("cleanup_failed"));
+        });
+
+        let teardown_effect = effect.clone();
+        use_message("teardown", move |message| {
+            let current = phase.get();
+            let Some(current) = current.as_str() else {
+                return;
+            };
+            if !matches!(current, "ready" | "failed") {
+                return;
+            }
+            let handle = environment_handle.get();
+            if handle.is_null() {
+                phase.set(json!(if current == "failed" {
+                    "failed_cleaned"
+                } else {
+                    "cleaned"
+                }));
+                return;
+            }
+            let input = json!({
+                "protocol_version": 2,
+                "run_id": message.run_id,
+                "environment_id": handle.get("environment_id"),
+                "plan_digest": handle.get("plan_digest"),
+            });
+            match teardown_effect(DurableEffectRequest {
+                key: "environment-teardown".into(),
+                adapter: "foundry-worker".into(),
+                operation: "environment_teardown".into(),
+                input,
+                result_type: "environment_teardown_result".into(),
+                error_type: "environment_teardown_error".into(),
+                replay_policy: DurableReplayPolicy::Idempotent,
+            }) {
+                Ok(_) => phase.set(json!(if current == "failed" {
+                    "tearing_down_after_failure"
+                } else {
+                    "tearing_down"
+                })),
+                Err(error) => {
+                    failure
+                        .set(json!({"phase": "environment_teardown", "error": error.to_string()}));
+                    phase.set(json!("failed"));
+                }
+            }
+        });
+        use_message("environment_teardown_result", move |message| {
+            if message
+                .payload
+                .get("cleanup_complete")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                phase.set(json!(
+                    if phase.get().as_str() == Some("tearing_down_after_failure") {
+                        "failed_cleaned"
+                    } else {
+                        "cleaned"
+                    }
+                ));
+            } else {
+                failure.set(message.payload.clone());
+                phase.set(json!("failed"));
+            }
+        });
+        PermissionManifest::default()
+    })
+}
+
+fn apply_worker_context(request: &mut Value, context: Option<&Value>) {
+    let Some(context) = context.and_then(Value::as_object) else {
+        return;
+    };
+    for key in [
+        "protocol_version",
+        "dependency_layer",
+        "resource_bindings",
+        "integration_bindings",
+        "secret_handles",
+        "test_environment",
+        "migration_phase",
+        "resource_policy",
+    ] {
+        if let Some(value) = context.get(key) {
+            request[key] = value.clone();
+        }
+    }
+}
+
+fn v2_worker_context(
+    plan: &V2ExecutionPlan,
+    state: &graphreact_core::DurableStateSnapshot,
+    node_id: &str,
+) -> Value {
+    let binding = plan
+        .node_bindings
+        .get(node_id)
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let values = state.nodes.get(V2_PREFLIGHT_NODE);
+    let resolution = values
+        .and_then(|values| values.get("dependency_result"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let handle = values
+        .and_then(|values| values.get("environment_handle"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let snapshot = values
+        .and_then(|values| values.get("environment_snapshot"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let dependency_layer = binding.get("package_root").and_then(|root| {
+        if root.is_null() {
+            return None;
+        }
+        Some(json!({
+            "artifact_id": resolution.pointer("/dependency_layer/sha256"),
+            "sha256": resolution.pointer("/evidence/dependency_layer_sha256"),
+            "package_root": root.get("id"),
+            "manifest_path": root.get("manifest_path"),
+            "lockfile_path": root.get("lockfile_path"),
+            "resolver_image": resolution.pointer("/evidence/resolver_image"),
+            "platform": resolution.pointer("/evidence/platform"),
+        }))
+    });
+    let environment = if handle.is_null() {
+        Value::Null
+    } else {
+        json!({
+            "environment_id": handle.get("environment_id"),
+            "network_id": handle.get("network_id"),
+            "snapshot_digest": snapshot.get("snapshot_digest"),
+            "resources": binding.get("resource_bindings").cloned().unwrap_or_else(|| json!([])),
+            "integrations": binding.get("integration_bindings").cloned().unwrap_or_else(|| json!([])),
+        })
+    };
+    json!({
+        "build_context": {
+            "protocol_version": 2,
+            "dependency_layer": dependency_layer,
+            "resource_bindings": binding.get("resource_bindings").cloned().unwrap_or_else(|| json!([])),
+            "integration_bindings": binding.get("integration_bindings").cloned().unwrap_or_else(|| json!([])),
+            "secret_handles": binding.get("secret_handles").cloned().unwrap_or_else(|| json!([])),
+        },
+        "test_context": {
+            "protocol_version": 2,
+            "dependency_layer": dependency_layer,
+            "test_environment": environment,
+            "migration_phase": if plan.migrations.as_array().is_some_and(|items| !items.is_empty()) {
+                "verified"
+            } else {
+                "not_required"
+            },
+            "resource_policy": if handle.is_null() {
+                json!({"timeout_ms": 300_000, "memory_mb": 1024, "cpu_count": 2, "pids": 256, "network": "none"})
+            } else {
+                json!({"timeout_ms": 300_000, "memory_mb": 2048, "cpu_count": 2, "pids": 512, "network": "private-integration"})
+            },
+        }
+    })
+}
+
 fn definition(node_id: String, job: Job) -> NodeDefinition {
     NodeDefinition::new(
         format!("FoundryDyad:{node_id}"),
@@ -160,6 +616,7 @@ fn definition(node_id: String, job: Job) -> NodeDefinition {
             let feedback = use_durable_state("feedback", Value::Null);
             let verdict = use_durable_state("verdict", Value::Null);
             let manager_decision = use_durable_state("manager_decision", Value::Null);
+            let worker_context = use_durable_state("worker_context", Value::Null);
             let effect = use_durable_effect();
             let artifact = use_durable_artifact();
 
@@ -173,6 +630,8 @@ fn definition(node_id: String, job: Job) -> NodeDefinition {
                 let mut request = build_request.clone();
                 request["attempt"] = json!(next_attempt);
                 request["feedback"] = feedback.get();
+                apply_worker_context(&mut request, message.payload.get("build_context"));
+                worker_context.set(message.payload.clone());
                 if let Some(run_id) = &message.run_id {
                     request["run_id"] = json!(run_id);
                 }
@@ -222,6 +681,9 @@ fn definition(node_id: String, job: Job) -> NodeDefinition {
                     return;
                 }
                 let mut request = test_request.clone();
+                request["attempt"] = json!(current_attempt);
+                let context = worker_context.get();
+                apply_worker_context(&mut request, context.get("test_context"));
                 if let Some(run_id) = &message.run_id {
                     request["run_id"] = json!(run_id);
                 }
@@ -247,6 +709,7 @@ fn definition(node_id: String, job: Job) -> NodeDefinition {
             });
 
             let test_artifact = artifact.clone();
+            let evidence_artifact = artifact.clone();
             let test_node_id = node_id.clone();
             use_message("test_result", move |message| {
                 let current_attempt = attempt.get().as_u64().unwrap_or_default();
@@ -257,7 +720,32 @@ fn definition(node_id: String, job: Job) -> NodeDefinition {
                     bytes,
                 });
                 if message.payload.get("verdict").and_then(Value::as_str) == Some("green") {
-                    verdict.set(message.payload.clone());
+                    let mut accepted = message.payload.clone();
+                    if let Some(evidence) = accepted.get("implementation_evidence") {
+                        let evidence_bytes = serde_json::to_vec(evidence).unwrap_or_default();
+                        match evidence_artifact(DurableArtifactRequest {
+                            logical_name: format!("{test_node_id}-evidence-{current_attempt}.json"),
+                            media_type:
+                                "application/vnd.foundry.node-implementation-evidence.v1+json"
+                                    .into(),
+                            bytes: evidence_bytes,
+                        }) {
+                            Ok(artifact_id) => {
+                                accepted["evidence_artifact_id"] = json!(artifact_id);
+                            }
+                            Err(error) => {
+                                retry_or_fail(
+                                    phase,
+                                    feedback,
+                                    manager_decision,
+                                    current_attempt,
+                                    json!({"error": error.to_string()}),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    verdict.set(accepted);
                     manager_decision.set(Value::Null);
                     phase.set(json!("green"));
                 } else {
@@ -577,6 +1065,7 @@ pub fn run(
     idempotency_key: &str,
     targets: &BTreeMap<String, ()>,
     preferred_run_id: Option<&str>,
+    v2: Option<V2ExecutionPlan>,
 ) -> Result<(), String> {
     debug_assert_eq!(MANAGER_DECISIONS.len(), 4);
     let mut definitions: HashMap<String, NodeDefinition> = jobs
@@ -585,6 +1074,9 @@ pub fn run(
         .collect();
     let mut graph = CommunicationGraph::new();
     graph.add_node(ir.root.as_str(), Attrs::new());
+    if v2.is_some() {
+        graph.add_node(V2_PREFLIGHT_NODE, Attrs::new());
+    }
     let mut scheduler = Scheduler::new(graph);
     let root_definition = definitions
         .remove(&ir.root)
@@ -592,6 +1084,16 @@ pub fn run(
     scheduler
         .register_node(root_definition, ir.root.as_str(), Attrs::new(), 0)
         .map_err(|error| error.to_string())?;
+    if let Some(v2) = &v2 {
+        scheduler
+            .register_node(
+                v2_preflight_definition(v2.clone()),
+                V2_PREFLIGHT_NODE,
+                Attrs::new(),
+                0,
+            )
+            .map_err(|error| error.to_string())?;
+    }
 
     let digest = DeploymentDigest::of(raw_ir);
     std::fs::create_dir_all(&durability_dir).map_err(|error| error.to_string())?;
@@ -746,10 +1248,65 @@ pub fn run(
             .iter()
             .map(|node_id| (node_id.clone(), phase(&state, node_id)))
             .collect();
+        let preflight_phase = v2.as_ref().map(|_| phase(&state, V2_PREFLIGHT_NODE));
+        if preflight_phase.as_deref() == Some("failed") {
+            let handle_exists = state
+                .nodes
+                .get(V2_PREFLIGHT_NODE)
+                .and_then(|values| values.get("environment_handle"))
+                .is_some_and(|handle| !handle.is_null());
+            if handle_exists {
+                enqueue_durable_message(
+                    &scheduler,
+                    engine.as_ref(),
+                    FENCING_TOKEN,
+                    V2_PREFLIGHT_NODE,
+                    "teardown",
+                    Value::Null,
+                    run.run_id.clone(),
+                    run.attempt_id.clone(),
+                    CorrelationId::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                continue;
+            }
+        }
+        if matches!(
+            preflight_phase.as_deref(),
+            Some("failed" | "failed_cleaned" | "cleanup_failed")
+        ) {
+            let detail = state
+                .nodes
+                .get(V2_PREFLIGHT_NODE)
+                .and_then(|values| values.get("failure"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            return Err(format!("IR v2 pre-build lifecycle failed: {detail}"));
+        }
         if targets
             .keys()
             .all(|node| phases.get(node).is_some_and(|value| value == "green"))
         {
+            if let Some(current) = preflight_phase.as_deref() {
+                if current == "ready" {
+                    enqueue_durable_message(
+                        &scheduler,
+                        engine.as_ref(),
+                        FENCING_TOKEN,
+                        V2_PREFLIGHT_NODE,
+                        "teardown",
+                        Value::Null,
+                        run.run_id.clone(),
+                        run.attempt_id.clone(),
+                        CorrelationId::new(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    continue;
+                }
+                if current != "cleaned" {
+                    continue;
+                }
+            }
             block_on(engine.commit(
                 FENCING_TOKEN,
                 &[RuntimeRecordV1::RunStatusChanged {
@@ -776,6 +1333,26 @@ pub fn run(
             .filter(|(node, _)| targets.contains_key(*node))
             .find(|(_, value)| *value == "failed")
         {
+            if let Some(current) = preflight_phase.as_deref() {
+                if current == "ready" {
+                    enqueue_durable_message(
+                        &scheduler,
+                        engine.as_ref(),
+                        FENCING_TOKEN,
+                        V2_PREFLIGHT_NODE,
+                        "teardown",
+                        Value::Null,
+                        run.run_id.clone(),
+                        run.attempt_id.clone(),
+                        CorrelationId::new(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    continue;
+                }
+                if current != "cleaned" {
+                    continue;
+                }
+            }
             let detail = state
                 .nodes
                 .get(node)
@@ -815,12 +1392,36 @@ pub fn run(
                 .any(|message| message.to == node_id && message.r#type == "build")
         };
         let mut scheduled = 0usize;
+        if preflight_phase.as_deref() == Some("pending")
+            && !queues
+                .inbox
+                .iter()
+                .chain(queues.postponed.iter())
+                .any(|message| message.to == V2_PREFLIGHT_NODE && message.r#type == "prepare")
+        {
+            enqueue_durable_message(
+                &scheduler,
+                engine.as_ref(),
+                FENCING_TOKEN,
+                V2_PREFLIGHT_NODE,
+                "prepare",
+                Value::Null,
+                run.run_id.clone(),
+                run.attempt_id.clone(),
+                CorrelationId::new(),
+            )
+            .map_err(|error| error.to_string())?;
+            scheduled += 1;
+        }
         for node_id in &plan.order {
             if !targets.contains_key(node_id) {
                 continue;
             }
             let current = phases.get(node_id).map(String::as_str).unwrap_or("pending");
             if !matches!(current, "pending" | "retry") || queued(node_id) {
+                continue;
+            }
+            if v2.is_some() && preflight_phase.as_deref() != Some("ready") {
                 continue;
             }
             let ready = plan.dependencies[node_id].iter().all(|dependency| {
@@ -834,7 +1435,9 @@ pub fn run(
                     FENCING_TOKEN,
                     node_id,
                     "build",
-                    Value::Null,
+                    v2.as_ref()
+                        .map(|plan| v2_worker_context(plan, &state, node_id))
+                        .unwrap_or(Value::Null),
                     run.run_id.clone(),
                     run.attempt_id.clone(),
                     CorrelationId::new(),
@@ -867,5 +1470,67 @@ mod tests {
         );
         assert_eq!(ManagerDecision::Escalate.as_str(), "escalate");
         assert_eq!(ManagerDecision::Fail.as_str(), "fail");
+    }
+
+    #[test]
+    fn v2_context_binds_exact_resolution_and_environment_snapshot() {
+        let plan = V2ExecutionPlan {
+            dependency_request: None,
+            environment_start_request: None,
+            migrations: json!([{"resource_id": "db"}]),
+            workspace: "/worktree".into(),
+            node_bindings: BTreeMap::from([(
+                "api".into(),
+                json!({
+                    "package_root": {
+                        "id": "api-root",
+                        "manifest_path": "package.json",
+                        "lockfile_path": "package-lock.json"
+                    },
+                    "resource_bindings": [],
+                    "integration_bindings": [],
+                    "secret_handles": []
+                }),
+            )]),
+        };
+        let state = graphreact_core::DurableStateSnapshot {
+            nodes: BTreeMap::from([(
+                V2_PREFLIGHT_NODE.into(),
+                BTreeMap::from([
+                    (
+                        "dependency_result".into(),
+                        json!({
+                            "evidence": {
+                                "dependency_layer_sha256": "a".repeat(64),
+                                "resolver_image": format!("resolver@sha256:{}", "b".repeat(64)),
+                                "platform": "linux/amd64"
+                            },
+                            "dependency_layer": {"sha256": "a".repeat(64)}
+                        }),
+                    ),
+                    (
+                        "environment_handle".into(),
+                        json!({"environment_id": "env-1", "network_id": "net-1"}),
+                    ),
+                    (
+                        "environment_snapshot".into(),
+                        json!({"snapshot_digest": "c".repeat(64)}),
+                    ),
+                ]),
+            )]),
+        };
+        let context = v2_worker_context(&plan, &state, "api");
+        assert_eq!(
+            context.pointer("/build_context/dependency_layer/package_root"),
+            Some(&json!("api-root"))
+        );
+        assert_eq!(
+            context.pointer("/test_context/test_environment/environment_id"),
+            Some(&json!("env-1"))
+        );
+        assert_eq!(
+            context.pointer("/test_context/migration_phase"),
+            Some(&json!("verified"))
+        );
     }
 }

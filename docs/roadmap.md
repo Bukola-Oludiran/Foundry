@@ -168,3 +168,51 @@ Status: editable preview implementation.
 - Postgres/S3 active-passive failover.
 - Autonomous approval or merge.
 - Languages beyond Python, TypeScript, and Go.
+
+## External dependencies, resources, and integrations
+
+Status: foundation and worker execution boundaries implemented; durable build orchestration remains in progress.
+
+- Implemented: strict IR v2 alongside unchanged IR v1, covering exact package roots/dependencies,
+  PostgreSQL, Redis, S3, NATS, SMTP, OIDC, HTTP/webhook/payment/model integrations, logical secret
+  references, bindings, fixtures, seeds, expectations, and migration checks.
+- Implemented compiler policy: safe paths, exact versions and integrity, ecosystem ownership,
+  credential-free registries, kind-specific resource configuration, migration exclusivity,
+  least-privilege permission compatibility, secret-literal rejection, declared integration use,
+  bounded retry/rate limits, and mandatory payment idempotency.
+- Implemented deterministic dependency and private-environment plans, semantic digests, strict JSON
+  Schema validation, CLI `deps resolve`, `deps audit`, and `resources plan`, plus a representative
+  TypeScript/PostgreSQL/payment fixture.
+- Implemented worker protocol v2 resolution contracts, strict request containment, pinned resolver
+  image enforcement, durable job idempotency through the existing worker ledger, and fail-closed
+  verification of lock, layer, SBOM, license, and vulnerability evidence. No unsafe host resolver
+  fallback exists.
+- Implemented environment lifecycle boundaries and authenticated worker routes for start, health,
+  migration, snapshot, and teardown. Responses are plan/run bound; migration ownership,
+  repeatability evidence, private aliases, pinned images, and complete cleanup fail closed.
+- Implemented the concrete OCI resolver adapter: it requires an internal Docker network and a
+  credential-free registry proxy, invokes a digest-pinned image without a shell, and applies a
+  read-only root, non-root identity, dropped capabilities, no-new-privileges, resource/time/output
+  bounds, and a read-only worktree mount.
+- Implemented an authenticated HTTPS/loopback adapter for an operator-owned Docker environment
+  controller, including bounded responses, abort/timeout propagation, readiness gating, and
+  credential-free error surfaces. Worker protocol v2 `/build` and `/test` now strictly accept and
+  validate dependency layers, resource/integration bindings, secret handles, environment snapshots,
+  and migration phase while preserving strict v1 behavior.
+- Implemented durable IR v2 build orchestration: `build` compiles either explicit IR version,
+  resolves packages, starts and health-checks the declared private environment, applies migrations,
+  snapshots it, gates node admission on the verified preflight, binds exact dependency/environment
+  identities into worker v2 requests, persists phase evidence, and tears the environment down on
+  green, node failure, or preflight failure. Every lifecycle call is an idempotent GraphReact effect.
+- Implemented the fail-closed OCI project-runner boundary. V2 tests cannot use the local/Piston
+  fallback; an authenticated HTTPS/loopback runner must acknowledge readiness. Results bind to the
+  exact job, run, node, dependency layer, environment snapshot, semantic/base revision, source
+  hashes, and acceptance cases, with strict bounds and redaction before durable replay.
+- Implemented deterministic generated resource output in the isolated run worktree:
+  `.foundry/resources/manifest.json` preserves the deployment-neutral plan and logical secret
+  bindings, while `docker-compose.yml` uses digest-image environment references, an internal-only
+  network, read-only services, dropped capabilities, and no published host ports or credentials.
+- Remaining: deployable runner/controller images that retrieve and mount dependency artifacts,
+  cancellation-time environment reconciliation, the concrete Docker controller/emulator service itself, complete
+  supply-chain/effect evidence materialization in the worktree, Studio editors/projections,
+  generated Compose/manifests, and the broad polyglot restart acceptance fixture.

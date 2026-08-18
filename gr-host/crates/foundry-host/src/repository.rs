@@ -18,7 +18,7 @@ pub struct DiffPolicy {
 /// Writes the approved architecture contract only inside Foundry's isolated worktree.
 pub fn materialize_architecture_files(
     worktree: &RunWorktree,
-    ir: &foundry_ir::Ir,
+    ir: &impl serde::Serialize,
     rationale: &serde_json::Value,
     layout: &serde_json::Value,
     locks: &serde_json::Value,
@@ -73,6 +73,61 @@ pub fn materialize_architecture_files(
         ".foundry/architecture/ir.json".into(),
         ".foundry/architecture/rationale.json".into(),
         ".foundry/architecture/layout.json".into(),
+    ])
+}
+
+pub fn materialize_generated_resources(
+    worktree: &RunWorktree,
+    generated: &foundry_ir::GeneratedResourceFilesV1,
+) -> Result<Vec<String>, String> {
+    let foundry_dir = worktree.path.join(".foundry");
+    let resources_dir = foundry_dir.join("resources");
+    for candidate in [&foundry_dir, &resources_dir] {
+        if candidate
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(format!(
+                "refusing resource materialization through symlink `{}`",
+                candidate.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(&resources_dir).map_err(|error| error.to_string())?;
+    let root = worktree
+        .path
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let target = resources_dir
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !target.starts_with(&root) {
+        return Err("resource materialization escaped the isolated worktree".into());
+    }
+    let write_atomic = |path: &Path, bytes: &[u8]| -> Result<(), String> {
+        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        use std::io::Write;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+    };
+    write_atomic(
+        &resources_dir.join("manifest.json"),
+        &serde_json::to_vec_pretty(&generated.manifest).map_err(|error| error.to_string())?,
+    )?;
+    write_atomic(
+        &resources_dir.join("docker-compose.yml"),
+        generated.compose.as_bytes(),
+    )?;
+    Ok(vec![
+        ".foundry/resources/manifest.json".into(),
+        ".foundry/resources/docker-compose.yml".into(),
     ])
 }
 
@@ -386,6 +441,33 @@ impl PullRequestPublisher for GitHubRepositoryProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_resources_materialize_only_inside_the_attempt() {
+        let root = std::env::temp_dir().join(format!(
+            "foundry-resource-materialization-{}",
+            std::process::id()
+        ));
+        let attempt = root.join("attempt");
+        std::fs::create_dir_all(&attempt).unwrap();
+        let ir: foundry_ir::IrV2 = serde_json::from_str(include_str!(
+            "../../../../ir/examples/service-stack.ir-v2.json"
+        ))
+        .unwrap();
+        let generated = foundry_ir::generate_resource_files(&ir).unwrap();
+        let worktree = RunWorktree {
+            path: attempt.clone(),
+            branch: "foundry/test".into(),
+            base_commit: "base".into(),
+        };
+        let paths = materialize_generated_resources(&worktree, &generated).unwrap();
+        assert_eq!(paths.len(), 2);
+        let compose =
+            std::fs::read_to_string(attempt.join(".foundry/resources/docker-compose.yml")).unwrap();
+        assert!(compose.contains("internal: true"));
+        assert!(!root.join(".foundry").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn scope_and_secret_validation_fail_closed() {

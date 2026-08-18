@@ -177,6 +177,12 @@ pub struct ArchitectureLayoutV1 {
     #[serde(default)]
     pub collapsed: BTreeSet<String>,
     pub selected_view: String,
+    #[serde(default)]
+    pub selected_element: Option<String>,
+    #[serde(default)]
+    pub inspector_section: Option<String>,
+    #[serde(default)]
+    pub show_internal_evidence: bool,
     pub zoom: f64,
     pub viewport: LayoutPointV1,
 }
@@ -735,10 +741,29 @@ mod tests {
             positions: BTreeMap::from([("hyphenate".into(), LayoutPointV1 { x: 100.0, y: 40.0 })]),
             collapsed: BTreeSet::new(),
             selected_view: "component".into(),
+            selected_element: Some("hyphenate".into()),
+            inspector_section: Some("contract".into()),
+            show_internal_evidence: false,
             zoom: 1.2,
             viewport: LayoutPointV1 { x: 2.0, y: 3.0 },
         };
         assert_eq!(before, studio_semantic_digest(&ir, &rationale, &[]));
+    }
+
+    #[test]
+    fn legacy_layout_defaults_rich_inspector_preferences() {
+        let layout: ArchitectureLayoutV1 = serde_json::from_value(serde_json::json!({
+            "layout_version": 1,
+            "positions": {},
+            "collapsed": [],
+            "selected_view": "component",
+            "zoom": 1.0,
+            "viewport": {"x": 0.0, "y": 0.0}
+        }))
+        .expect("legacy layout remains readable");
+        assert_eq!(layout.selected_element, None);
+        assert_eq!(layout.inspector_section, None);
+        assert!(!layout.show_internal_evidence);
     }
 
     proptest! {
@@ -753,6 +778,9 @@ mod tests {
                 positions: BTreeMap::from([("hyphenate".into(), LayoutPointV1 { x, y })]),
                 collapsed: BTreeSet::new(),
                 selected_view: "dependency".into(),
+                selected_element: None,
+                inspector_section: None,
+                show_internal_evidence: false,
                 zoom,
                 viewport: LayoutPointV1 { x: -x, y: -y },
             };

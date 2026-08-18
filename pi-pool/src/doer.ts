@@ -4,7 +4,7 @@
 // loop is needed yet (that's the FST+abortOnToolSuccess variant for later, multi-turn
 // doers). Every write goes THROUGH the sandbox, so even a controlled write is scope-proven.
 
-import type { BuildRequest, BuildResult } from "./contract.ts";
+import type { BuildRequest, BuildRequestV2, BuildResult } from "./contract.ts";
 import type { LlmClient } from "./llm.ts";
 import { runSandboxed } from "./sandbox.ts";
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from "node:fs";
@@ -21,7 +21,7 @@ const MAX_DOER_TURNS = 3;
 const MAX_TOOL_BYTES = 256 * 1024;
 
 /** Build the doer prompt from the node's contract + its dependency interfaces. */
-export function assemblePrompt(req: BuildRequest): string {
+export function assemblePrompt(req: BuildRequest | BuildRequestV2): string {
   const ops = req.provides.operations
     .map(
       (o) =>
@@ -63,7 +63,7 @@ const abs = (workspace: string, p: string): string =>
   isAbsolute(p) ? p : join(workspace, p);
 
 export async function buildNode(
-  req: BuildRequest,
+  req: BuildRequest | BuildRequestV2,
   llm: LlmClient,
   sandboxRunner: (
     scope: Parameters<typeof runSandboxed>[0],
