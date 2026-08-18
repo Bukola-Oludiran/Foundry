@@ -311,10 +311,12 @@ export type PackageEcosystemV2 = "npm" | "pypi" | "go";
 
 export interface PackageDependencyResolutionV2 {
   id: string;
+  ecosystem: PackageEcosystemV2;
   name: string;
   version: string;
   integrity: string;
   features: string[];
+  extras: string[];
   scope: "runtime" | "development" | "build";
   owner_node: string;
   package_root: string;

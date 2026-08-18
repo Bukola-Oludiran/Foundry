@@ -53,10 +53,12 @@ const request: ResolveDependenciesRequestV2 = {
         packages: [
           {
             id: "zod",
+            ecosystem: "npm",
             name: "zod",
             version: "4.1.0",
             integrity: "sha512-example",
             features: [],
+            extras: [],
             scope: "runtime",
             owner_node: "web",
             package_root: "web",

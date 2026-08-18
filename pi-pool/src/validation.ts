@@ -893,10 +893,12 @@ export function validateResolveDependenciesRequest(
         pkg,
         [
           "id",
+          "ecosystem",
           "name",
           "version",
           "integrity",
           "features",
+          "extras",
           "scope",
           "owner_node",
           "package_root",
@@ -912,6 +914,13 @@ export function validateResolveDependenciesRequest(
         );
       }
       packageIds.add(packageId);
+      if (pkg.ecosystem !== root.ecosystem) {
+        throw new RequestError(
+          400,
+          "INVALID_REQUEST",
+          `${packageLabel}.ecosystem is inconsistent`,
+        );
+      }
       string(pkg.name, `${packageLabel}.name`);
       const version = string(pkg.version, `${packageLabel}.version`);
       if (
@@ -937,6 +946,9 @@ export function validateResolveDependenciesRequest(
       array(pkg.features, `${packageLabel}.features`, 128).forEach(
         (feature, index) =>
           string(feature, `${packageLabel}.features[${index}]`),
+      );
+      array(pkg.extras, `${packageLabel}.extras`, 128).forEach((extra, index) =>
+        string(extra, `${packageLabel}.extras[${index}]`),
       );
       if (!["runtime", "development", "build"].includes(String(pkg.scope))) {
         throw new RequestError(

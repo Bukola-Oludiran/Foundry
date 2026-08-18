@@ -1,0 +1,71 @@
+{
+  "ir_version": 2,
+  "spec": {
+    "name": "polyglot-live-acceptance",
+    "description": "Live restart acceptance across Python, TypeScript, Go, PostgreSQL, and a deterministic payment contract.",
+    "language": "typescript"
+  },
+  "root": "system",
+  "nodes": [
+    {
+      "id": "system",
+      "kind": "integrator",
+      "owner": null,
+      "provides": { "name": "System", "operations": [{ "name": "start", "signature": "start() -> status" }], "types": [] },
+      "requires": [],
+      "implementation": { "children": ["normalizer", "payments", "counter"], "write_target": "src/system.ts", "composition": "Expose deterministic readiness after children pass independently." },
+      "acceptance": { "mandate_owner": "spec", "language": "typescript", "cases": [{ "name": "starts", "call": "start()", "expect": "ready" }], "properties": [] }
+    },
+    {
+      "id": "normalizer",
+      "kind": "leaf",
+      "owner": "system",
+      "provides": { "name": "Normalizer", "operations": [{ "name": "normalize", "signature": "normalize() -> string" }], "types": [] },
+      "requires": [],
+      "implementation": { "language": "python", "write_target": "src/normalizer.py", "entrypoint": "src/normalizer.py" },
+      "acceptance": { "mandate_owner": "system", "language": "python", "cases": [{ "name": "normalizes", "call": "normalize()", "expect": "ready" }], "properties": [] }
+    },
+    {
+      "id": "payments",
+      "kind": "leaf",
+      "owner": "system",
+      "provides": { "name": "Payments", "operations": [{ "name": "charge", "signature": "charge() -> status" }], "types": [] },
+      "requires": [],
+      "implementation": { "language": "typescript", "write_target": "src/payments.ts", "entrypoint": "src/payments.ts" },
+      "acceptance": { "mandate_owner": "system", "language": "typescript", "cases": [{ "name": "charges through declared contract", "call": "charge()", "expect": "accepted" }], "properties": [] }
+    },
+    {
+      "id": "counter",
+      "kind": "leaf",
+      "owner": "system",
+      "provides": { "name": "Counter", "operations": [{ "name": "Count", "signature": "Count() -> number" }], "types": [] },
+      "requires": [],
+      "implementation": { "language": "go", "write_target": "src/counter.go", "entrypoint": "src/counter.go" },
+      "acceptance": { "mandate_owner": "system", "language": "go", "cases": [{ "name": "counts", "call": "Count()", "expect": 3 }], "properties": [] }
+    }
+  ],
+  "package_roots": [
+    { "id": "node-workspace", "language": "typescript", "manifest_path": "package.json", "lockfile_path": "package-lock.json", "resolver": { "mode": "locked", "allow_prereleases": false }, "workspace_members": ["src"], "registry_allowlist": ["https://registry.npmjs.org"] }
+  ],
+  "packages": [
+    { "id": "stable-json", "ecosystem": "npm", "name": "fast-json-stable-stringify", "version": "2.1.0", "integrity": "sha512-livefixtureintegrity", "scope": "runtime", "owner_node": "payments", "package_root": "node-workspace", "features": [], "extras": [] }
+  ],
+  "resources": [
+    { "id": "primary-db", "kind": "postgresql", "version": "17.2", "configuration": { "database": "foundry" }, "migration_owner": "payments", "migration_path": "migrations", "require_repeatable_migrations": true }
+  ],
+  "resource_bindings": [
+    { "resource": "primary-db", "node": "payments", "permissions": ["read", "write", "admin"], "environment": { "url": "DATABASE_URL" } }
+  ],
+  "integrations": [
+    { "id": "payments-api", "kind": "stripe", "operations": ["create-payment"], "contract_path": "contracts/payments.json", "sensitive_fields": ["authorization"] }
+  ],
+  "integration_bindings": [
+    { "integration": "payments-api", "node": "payments", "operations": ["create-payment"], "secret_ref": "stripe-key", "timeout_ms": 3000, "retry": { "max_attempts": 2, "initial_backoff_ms": 100, "max_backoff_ms": 500 }, "rate_limit": { "requests": 10, "per_seconds": 1 }, "idempotency": true }
+  ],
+  "secret_refs": [
+    { "id": "stripe-key", "provider": "environment", "name": "STRIPE_API_KEY" }
+  ],
+  "test_environments": [
+    { "node": "payments", "resources": ["primary-db"], "integrations": ["payments-api"], "fixtures": {}, "database_seeds": [], "integration_expectations": [{ "integration": "payments-api", "operation": "create-payment", "request": { "amount": 1000 }, "response": { "status": "accepted" } }], "verify_migrations": ["primary-db"] }
+  ]
+}

@@ -277,7 +277,7 @@ fn retry_or_fail(
 }
 
 fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
-    NodeDefinition::new("FoundryV2Preflight", move |_ctx: &NodeContext| {
+    NodeDefinition::new(V2_PREFLIGHT_NODE, move |_ctx: &NodeContext| {
         let phase = use_durable_state("phase", json!("pending"));
         let failure = use_durable_state("failure", Value::Null);
         let dependency_result = use_durable_state("dependency_result", Value::Null);
@@ -402,7 +402,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
             environment_handle.set(message.payload.clone());
             let input = json!({
                 "protocol_version": 2,
-                "run_id": message.run_id,
+                "run_id": message.payload.get("run_id"),
                 "environment_id": environment_id,
                 "plan_digest": plan_digest,
             });
@@ -435,7 +435,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
             let handle = environment_handle.get();
             let mut input = json!({
                 "protocol_version": 2,
-                "run_id": message.run_id,
+                "run_id": handle.get("run_id"),
                 "environment_id": handle.get("environment_id"),
                 "plan_digest": handle.get("plan_digest"),
             });
@@ -498,7 +498,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
             let handle = environment_handle.get();
             let input = json!({
                 "protocol_version": 2,
-                "run_id": message.run_id,
+                "run_id": handle.get("run_id"),
                 "environment_id": handle.get("environment_id"),
                 "plan_digest": handle.get("plan_digest"),
             });
@@ -545,7 +545,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
 
         let evidence_effect = effect.clone();
         let evidence_plan = plan.clone();
-        use_message("collect_evidence", move |message| {
+        use_message("collect_evidence", move |_message| {
             if phase.get().as_str() != Some("ready") {
                 return;
             }
@@ -556,7 +556,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
                 .and_then(|request| request.get("plan"));
             let input = json!({
                 "protocol_version": 2,
-                "run_id": message.run_id,
+                "run_id": handle.get("run_id"),
                 "environment_id": handle.get("environment_id"),
                 "plan_digest": handle.get("plan_digest"),
                 "expectations": environment_plan.and_then(|plan| plan.get("integration_expectations")).cloned().unwrap_or_else(|| json!([])),
@@ -620,7 +620,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
         });
 
         let teardown_effect = effect.clone();
-        use_message("teardown", move |message| {
+        use_message("teardown", move |_message| {
             let current = phase.get();
             let Some(current) = current.as_str() else {
                 return;
@@ -639,7 +639,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
             }
             let input = json!({
                 "protocol_version": 2,
-                "run_id": message.run_id,
+                "run_id": handle.get("run_id"),
                 "environment_id": handle.get("environment_id"),
                 "plan_digest": handle.get("plan_digest"),
             });
@@ -684,7 +684,28 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
                 phase.set(json!("failed"));
             }
         });
-        PermissionManifest::default()
+        PermissionManifest::new(
+            [
+                "prepare",
+                "dependency_result",
+                "dependency_error",
+                "environment_start_result",
+                "environment_start_error",
+                "environment_health_result",
+                "environment_health_error",
+                "environment_migrations_result",
+                "environment_migrations_error",
+                "environment_snapshot_result",
+                "environment_snapshot_error",
+                "collect_evidence",
+                "environment_evidence_result",
+                "environment_evidence_error",
+                "teardown",
+                "environment_teardown_result",
+                "environment_teardown_error",
+            ],
+            Vec::<String>::new(),
+        )
     })
 }
 
@@ -1404,11 +1425,19 @@ pub fn run(
             &registry,
         ))
         .map_err(|error| error.to_string())?;
+        if phase(&scheduler.snapshot_durable_state(), V2_PREFLIGHT_NODE) == "collecting_evidence"
+            && dispatched.dispatched > 0
+        {
+            crash_injection("after_environment_evidence_dispatch");
+        }
         crash_injection("after_effect_dispatch");
         scheduler
             .process_batch()
             .map_err(|error| error.to_string())?;
         crash_injection("after_effect_result_application");
+        if phase(&scheduler.snapshot_durable_state(), V2_PREFLIGHT_NODE) == "evidence_collected" {
+            crash_injection("after_environment_evidence_commit");
+        }
 
         let state = scheduler.snapshot_durable_state();
         let phases: BTreeMap<_, _> = plan
@@ -1644,7 +1673,11 @@ pub fn run(
             && dispatched.result_messages == 0
             && queues.inbox.is_empty()
         {
-            return Err(format!("durable scheduler made no progress: {phases:?}"));
+            return Err(format!(
+                "durable scheduler made no progress: nodes={phases:?} preflight={preflight_phase:?} dispatch={dispatched:?} inbox={} postponed={}",
+                queues.inbox.len(),
+                queues.postponed.len(),
+            ));
         }
     }
 }

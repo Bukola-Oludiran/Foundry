@@ -1,4 +1,4 @@
-.PHONY: install fmt fmt-check lint test test-local test-durable-restart check
+.PHONY: install fmt fmt-check lint test test-local test-durable-restart test-live-polyglot check
 
 install:
 	npm ci
@@ -32,5 +32,8 @@ test-local:
 test-durable-restart:
 	cargo build --manifest-path gr-host/Cargo.toml --locked
 	npm run --prefix pi-pool validate:durable-restart
+
+test-live-polyglot:
+	npm run --prefix pi-pool validate:live-polyglot
 
 check: fmt-check lint test

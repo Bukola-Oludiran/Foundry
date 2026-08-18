@@ -7,6 +7,7 @@ import {
   realpathSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -220,15 +221,54 @@ export class DockerEnvironmentController {
     const state = this.require(request);
     const services = [];
     for (const container of state.containers) {
-      const inspection = await this.run(
-        ["inspect", "--format", "{{.State.Running}}", container.name],
-        10_000,
-        undefined,
-        signal,
-      );
+      let healthy = false;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const inspection = await this.run(
+          ["inspect", "--format", "{{.State.Running}}", container.name],
+          10_000,
+          undefined,
+          signal,
+        );
+        healthy = inspection.code === 0 && inspection.stdout.trim() === "true";
+        if (healthy && container.kind === "postgresql") {
+          const ready = await this.run(
+            [
+              "exec",
+              container.name,
+              "pg_isready",
+              "-U",
+              "foundry",
+              "-d",
+              "foundry",
+            ],
+            10_000,
+            undefined,
+            signal,
+          );
+          healthy = ready.code === 0;
+        }
+        if (healthy && container.kind.startsWith("integration:")) {
+          const ready = await this.run(
+            [
+              "exec",
+              container.name,
+              "node",
+              "--input-type=module",
+              "--eval",
+              "const r=await fetch('http://127.0.0.1:8080/ready');if(!r.ok)process.exit(2)",
+            ],
+            10_000,
+            undefined,
+            signal,
+          );
+          healthy = ready.code === 0;
+        }
+        if (healthy) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
       services.push({
         id: container.id,
-        healthy: inspection.code === 0 && inspection.stdout.trim() === "true",
+        healthy,
         detail: null,
       });
     }
@@ -296,6 +336,8 @@ export class DockerEnvironmentController {
             "psql",
             "--set",
             "ON_ERROR_STOP=1",
+            "--username",
+            "foundry",
             "--dbname",
             "foundry",
           ],
@@ -315,6 +357,8 @@ export class DockerEnvironmentController {
               "psql",
               "--set",
               "ON_ERROR_STOP=1",
+              "--username",
+              "foundry",
               "--dbname",
               "foundry",
             ],
@@ -490,6 +534,13 @@ export class DockerEnvironmentController {
       signal,
     );
     const complete = remaining.code === 0 && remaining.stdout.trim() === "";
+    if (complete && state) {
+      try {
+        unlinkSync(this.statePath(request.environment_id));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     const evidence = {
       environment_id: request.environment_id,
       plan_digest: request.plan_digest,
@@ -583,6 +634,9 @@ export class DockerEnvironmentController {
       "--label",
       `foundry.plan_digest=${request.plan.plan_digest}`,
     ];
+    if (kind === "postgresql") {
+      args.push("--user", "70:70");
+    }
     for (const [key, value] of Object.entries(environmentVariables)) {
       args.push("--env", `${key}=${value}`);
     }
@@ -655,7 +709,11 @@ export class DockerEnvironmentController {
   private resourceTmpfs(kind: string): string[] {
     const common = ["/tmp:rw,noexec,nosuid,size=64m"];
     if (kind === "postgresql")
-      return [...common, "/var/lib/postgresql/data:rw,nosuid,size=512m"];
+      return [
+        ...common,
+        "/var/run/postgresql:rw,nosuid,size=16m,uid=70,gid=70,mode=0770",
+        "/var/lib/postgresql/data:rw,nosuid,size=512m,uid=70,gid=70,mode=0700",
+      ];
     if (kind === "s3") return [...common, "/data:rw,nosuid,size=512m"];
     if (kind === "oidc")
       return [...common, "/opt/keycloak/data:rw,nosuid,size=256m"];

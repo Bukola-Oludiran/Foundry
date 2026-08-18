@@ -13,10 +13,12 @@ const roots: PackageResolutionRootV2[] = [
     packages: [
       {
         id: "zod",
+        ecosystem: "npm",
         name: "zod",
         version: "4.1.0",
         integrity: "sha512-fixture-value",
         features: [],
+        extras: [],
         scope: "runtime",
         owner_node: "web",
         package_root: "web",
@@ -34,10 +36,12 @@ const roots: PackageResolutionRootV2[] = [
     packages: [
       {
         id: "httpx",
+        ecosystem: "pypi",
         name: "httpx",
         version: "0.28.1",
         integrity: "sha256-fixture-value",
         features: ["http2"],
+        extras: [],
         scope: "runtime",
         owner_node: "worker",
         package_root: "worker",
@@ -55,10 +59,12 @@ const roots: PackageResolutionRootV2[] = [
     packages: [
       {
         id: "uuid",
+        ecosystem: "go",
         name: "github.com/google/uuid",
         version: "v1.6.0",
         integrity: "h1:fixture-value",
         features: [],
+        extras: [],
         scope: "runtime",
         owner_node: "api",
         package_root: "api",

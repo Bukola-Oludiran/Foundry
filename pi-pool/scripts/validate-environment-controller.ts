@@ -226,7 +226,7 @@ try {
   });
   check(
     migration.green &&
-      calls.filter((call) => call.args[0] === "exec").length === 2,
+      calls.filter((call) => call.args.includes("psql")).length === 2,
     "applies and repeat-verifies PostgreSQL migrations",
   );
   const snapshot = restarted.snapshot({

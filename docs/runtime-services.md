@@ -70,6 +70,12 @@ Dependency archives are checksum-verified, path-checked before extraction, rejec
 links or oversized entries, and mounted read-only. The runner never mounts the Docker socket into a
 test container.
 
+Run `make test-live-polyglot` for the complete operator acceptance. The harness constructs an
+operator-style immutable catalog, starts PostgreSQL and the deterministic payment emulator on an
+internal network, executes all three supported languages in OCI, and restarts the durable host at
+both post-test evidence boundaries. Set `FOUNDRY_REQUIRE_LIVE_DOCKER=1` when absence of Docker must
+be treated as a failure; CI does this.
+
 Use `pi-pool/runtime/docker-compose.controller.yml` as an operator template. It intentionally
 publishes no ports. Connect the worker through an operator-controlled internal network or local
 proxy, and set:

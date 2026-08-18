@@ -176,7 +176,7 @@ Status: editable preview implementation.
 
 ## External dependencies, resources, and integrations
 
-Status: foundation and worker execution boundaries implemented; durable build orchestration remains in progress.
+Status: implemented, including live polyglot restart acceptance.
 
 - Implemented: strict IR v2 alongside unchanged IR v1, covering exact package roots/dependencies,
   PostgreSQL, Redis, S3, NATS, SMTP, OIDC, HTTP/webhook/payment/model integrations, logical secret
@@ -257,8 +257,13 @@ Status: foundation and worker execution boundaries implemented; durable build or
   verified against the accepted plan, and every declared resource contributes bounded CPU, memory,
   and PID measurements before teardown. Missing, unexpected, mismatched, unsafe, or incomplete
   evidence fails closed and the verified projection is retained with lifecycle evidence.
-- Remaining: the broad polyglot restart acceptance fixture, including live-Docker
-  controller/emulator coverage and operator catalog generation. Buzz now has
-  typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
-  expectation mutation forms plus dedicated managed-resource and third-party integration graph
-  projections. IR v1 never projects ordinary dependencies into those views.
+- Implemented the broad live-Docker acceptance fixture. It builds a catalog-backed resolver and
+  deterministic integration emulator, runs Python, TypeScript, and Go acceptance in pinned OCI
+  toolchains, applies repeatable PostgreSQL migrations, verifies exact external-contract and
+  resource-usage evidence, and injects crashes both after evidence dispatch and after its durable
+  commit. Recovery produces one delivery commit, one observed external request, complete teardown,
+  and no retained controller state. Run it with `make test-live-polyglot`; CI requires Docker rather
+  than silently skipping it. Buzz has typed package-root, declaration, binding, secret-reference,
+  fixture, seed, and contract-expectation mutation forms plus dedicated managed-resource and
+  third-party integration graph projections. IR v1 never projects ordinary dependencies into those
+  views.

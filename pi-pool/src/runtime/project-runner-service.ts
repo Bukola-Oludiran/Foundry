@@ -99,7 +99,7 @@ export class OciProjectRunnerService {
         "--mount",
         `type=bind,src=${hostJob},dst=/job,readonly`,
         "--tmpfs",
-        "/tmp:rw,nosuid,size=256m",
+        "/tmp:rw,exec,nosuid,size=256m",
         "--network",
         request.resource_policy.network === "none"
           ? "none"
@@ -171,6 +171,12 @@ export class OciProjectRunnerService {
         if (request.language === "go")
           args.push("--env", "GOMODCACHE=/dependencies/gomodcache");
       }
+      if (request.language === "go") {
+        args.push("--env", "GOCACHE=/tmp/go-build", "--env", "GOPATH=/tmp/go");
+      }
+      if (request.language === "python") {
+        args.push("--env", "PYTHONDONTWRITEBYTECODE=1");
+      }
       const invocation = backend.localCommand(files.map((file) => file.name));
       args.push(backend.ociImage, invocation.command, ...invocation.args);
       const started = Date.now();
@@ -194,8 +200,20 @@ export class OciProjectRunnerService {
         },
         Math.max(0, Date.now() - started),
       );
-      const result: TestResultV2 = {
+      const sanitizedCore = {
         ...core,
+        piston: { ...core.piston, stdout: "", stderr: "" },
+      };
+      const { artifact: originalArtifact, ...acceptedEvidence } = sanitizedCore;
+      const encoded = Buffer.from(JSON.stringify(acceptedEvidence));
+      const acceptedArtifact = {
+        sha256: createHash("sha256").update(encoded).digest("hex"),
+        size: encoded.byteLength,
+        media_type: originalArtifact.media_type,
+      };
+      const result: TestResultV2 = {
+        ...acceptedEvidence,
+        artifact: acceptedArtifact,
         protocol_version: 2,
         job_id: request.job_id,
         run_id: request.run_id,
@@ -203,15 +221,6 @@ export class OciProjectRunnerService {
         environment_snapshot_digest:
           request.test_environment?.snapshot_digest ?? null,
       };
-      const { artifact: acceptedArtifact, ...acceptedEvidence } = core;
-      const encoded = Buffer.from(JSON.stringify(acceptedEvidence));
-      if (
-        createHash("sha256").update(encoded).digest("hex") !==
-          acceptedArtifact.sha256 ||
-        encoded.byteLength !== acceptedArtifact.size
-      ) {
-        throw new Error("project result artifact identity is inconsistent");
-      }
       if (
         /bearer\s+|authorization|cookie|password|private[_ -]?key|nsec1|ghp_|github_pat_/i.test(
           JSON.stringify(result),

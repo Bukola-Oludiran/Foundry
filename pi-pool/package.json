@@ -31,6 +31,7 @@
     "validate:v2-server": "node scripts/validate-v2-server.ts",
     "validate:worker-v2": "node scripts/validate-worker-v2.ts",
     "validate:durable-restart": "node scripts/validate-durable-restart.ts",
+    "validate:live-polyglot": "node scripts/validate-live-polyglot.ts",
     "validate:oci": "node scripts/validate-oci-sandbox.ts",
     "test": "npm run typecheck && npm run validate:ir && npm run validate:runner-gen && npm run validate:languages && npm run validate:evidence && npm run validate:dependency-resolution && npm run validate:dependency-resolver-command && npm run validate:package-backends && npm run validate:environment-manager && npm run validate:environment-controller && npm run validate:integration-emulator && npm run validate:runtime-images && npm run validate:project-runner && npm run validate:project-runner-service && npm run validate:worker-v2 && npm run validate:doer-tools && npm run validate:architect && npm run validate:security && npm run validate:worker-restart && npm run validate:v2-server",
     "test:local": "npm test && npm run validate:sandbox && npm run validate:build && npm run validate:server"

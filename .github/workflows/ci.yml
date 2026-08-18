@@ -86,3 +86,7 @@ jobs:
         env:
           FOUNDRY_SANDBOX: oci
           FOUNDRY_ALLOW_ROOTFUL_OCI: "1"
+      - run: npm run validate:live-polyglot
+        working-directory: pi-pool
+        env:
+          FOUNDRY_REQUIRE_LIVE_DOCKER: "1"

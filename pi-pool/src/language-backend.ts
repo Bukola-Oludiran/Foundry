@@ -59,7 +59,7 @@ const BACKENDS: Record<SupportedLanguage, LanguageBackend> = {
       "docker.io/library/node@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019",
     moduleFile: (name) => `${name}.ts`,
     generateRunner: generateTypeScriptRunner,
-    localCommand: () => ({ command: process.execPath, args: ["__runner.ts"] }),
+    localCommand: () => ({ command: "node", args: ["__runner.ts"] }),
     validateCases: (cases) => ensureCalls("typescript", cases),
     extractSymbols: typeScriptSymbols,
   },
