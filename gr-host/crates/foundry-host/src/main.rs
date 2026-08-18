@@ -16,6 +16,7 @@
 mod agent_runtime;
 mod architect;
 mod collaboration;
+mod dependency_files;
 mod durable;
 mod http;
 mod repository;
@@ -23,11 +24,13 @@ mod sidecar;
 mod studio;
 mod studio_room;
 mod studio_service;
-use http::http_post_json;
+use dependency_files::materialize_native_dependency_files;
+use http::{http_get_bytes, http_post_json};
 use repository::{
-    git_revision, materialize_architecture_files, materialize_dependency_resolution,
-    materialize_generated_resources, DiffPolicy, GitHubRepositoryProvider, LocalGitRepository,
-    PullRequestPublisher, RepositoryProvider,
+    dependency_file_artifacts, git_revision, materialize_architecture_files,
+    materialize_dependency_resolution, materialize_generated_resources, ContentArtifactRef,
+    DiffPolicy, GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher,
+    RepositoryProvider,
 };
 
 use foundry_ir::types::{Ir, Kind, Node};
@@ -475,6 +478,33 @@ fn v2_execution_plan(
         workspace: workspace.to_owned(),
         node_bindings,
     })
+}
+
+fn fetch_dependency_artifact(
+    base: &str,
+    token: &str,
+    artifact: &ContentArtifactRef,
+) -> Result<Vec<u8>, String> {
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    let expected_size = usize::try_from(artifact.size)
+        .map_err(|_| "dependency artifact size cannot be represented".to_string())?;
+    if expected_size > MAX_BYTES {
+        return Err("dependency artifact exceeds its materialization bound".into());
+    }
+    let bytes = http_get_bytes(
+        base,
+        &format!("/v2/dependencies/artifacts/{}", artifact.sha256),
+        token,
+        MAX_BYTES,
+    )?;
+    if bytes.len() != expected_size {
+        return Err("dependency artifact size does not match its verified metadata".into());
+    }
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if actual != artifact.sha256 {
+        return Err("dependency artifact checksum does not match its verified metadata".into());
+    }
+    Ok(bytes)
 }
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
@@ -1501,6 +1531,40 @@ fn main() {
                             std::process::exit(1);
                         },
                     ),
+                );
+                let ir_v2 = ir_v2
+                    .as_ref()
+                    .ok_or("dependency resolution belongs to a non-v2 build")
+                    .unwrap_or_else(|error| {
+                        eprintln!("materialize native dependency files: {error}");
+                        std::process::exit(1);
+                    });
+                let (manifest, lockfile) =
+                    dependency_file_artifacts(resolution).unwrap_or_else(|error| {
+                        eprintln!("read dependency artifact identities: {error}");
+                        std::process::exit(1);
+                    });
+                let manifest_bytes = fetch_dependency_artifact(&base, &worker_token, &manifest)
+                    .unwrap_or_else(|error| {
+                        eprintln!("fetch dependency manifest bundle: {error}");
+                        std::process::exit(1);
+                    });
+                let lockfile_bytes = fetch_dependency_artifact(&base, &worker_token, &lockfile)
+                    .unwrap_or_else(|error| {
+                        eprintln!("fetch dependency lockfile bundle: {error}");
+                        std::process::exit(1);
+                    });
+                architecture_paths.extend(
+                    materialize_native_dependency_files(
+                        worktree,
+                        ir_v2,
+                        &manifest_bytes,
+                        &lockfile_bytes,
+                    )
+                    .unwrap_or_else(|error| {
+                        eprintln!("materialize native dependency files: {error}");
+                        std::process::exit(1);
+                    }),
                 );
             }
             let policy = DiffPolicy {

@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -10,6 +11,7 @@ import {
   verifyDependencyResolutionResult,
 } from "../src/dependency-resolver.ts";
 import type { ProcessRunner } from "../src/process-runner.ts";
+import { FilesystemDependencyArtifactStore } from "../src/dependency-artifacts.ts";
 import {
   RequestError,
   validateResolveDependenciesRequest,
@@ -69,11 +71,14 @@ const request: ResolveDependenciesRequestV2 = {
   },
 };
 
-const artifact = {
-  sha256: digest("e"),
+const artifact = (
+  character: string,
+  media_type = "application/octet-stream",
+) => ({
+  sha256: digest(character),
   size: 1,
-  media_type: "application/octet-stream",
-};
+  media_type,
+});
 const result: ResolveDependenciesResultV2 = {
   ok: true,
   evidence: {
@@ -96,12 +101,12 @@ const result: ResolveDependenciesResultV2 = {
     ],
     vulnerabilities: [],
   },
-  manifest: artifact,
-  lockfile: artifact,
-  dependency_layer: artifact,
-  sbom: artifact,
-  license_report: artifact,
-  vulnerability_report: artifact,
+  manifest: artifact("1", "application/vnd.foundry.package-manifests.v1+json"),
+  lockfile: artifact("2", "application/vnd.foundry.package-lockfiles.v1+json"),
+  dependency_layer: artifact("3"),
+  sbom: artifact("4"),
+  license_report: artifact("5"),
+  vulnerability_report: artifact("6"),
   error: null,
   failure_code: null,
 };
@@ -215,6 +220,31 @@ try {
         },
       }),
   );
+  await acceptAsync(
+    "artifact store verifies content-addressed bytes",
+    async () => {
+      const directory = join(workspace, "artifacts");
+      mkdirSync(directory);
+      const bytes = Buffer.from("manifest bundle");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      writeFileSync(join(directory, sha256), bytes);
+      const store = new FilesystemDependencyArtifactStore(directory);
+      const loaded = await store.read(sha256, new AbortController().signal);
+      if (!loaded.equals(bytes)) throw new Error("artifact bytes changed");
+      writeFileSync(join(directory, sha256), "corrupt");
+      try {
+        await store.read(sha256, new AbortController().signal);
+        throw new Error("corrupt artifact was accepted");
+      } catch (error) {
+        if (
+          !(error instanceof RequestError) ||
+          error.code !== "ARTIFACT_CHECKSUM_MISMATCH"
+        ) {
+          throw error;
+        }
+      }
+    },
+  );
   const calls: Array<{ command: string; args: string[]; input?: string }> = [];
   const runner: ProcessRunner = {
     async run(command, args, options) {
@@ -242,6 +272,7 @@ try {
       const resolver = new OciDependencyResolver({
         network: "foundry-registry-internal",
         proxyUrl: "http://registry-proxy:8080",
+        artifactDirectory: join(workspace, "artifacts"),
         runner,
       });
       await resolver.resolve(request, new AbortController().signal);
@@ -253,6 +284,8 @@ try {
         !invocation.args.includes("foundry-registry-internal") ||
         !invocation.args.includes(request.resolver_image) ||
         !invocation.args.some((value) => value.endsWith(",readonly")) ||
+        !invocation.args.some((value) => value.endsWith(",dst=/artifacts")) ||
+        !invocation.args.includes("FOUNDRY_ARTIFACT_DIR=/artifacts") ||
         invocation.input !== JSON.stringify(request)
       ) {
         throw new Error("OCI resolver invocation omitted a required boundary");

@@ -1,8 +1,10 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { DependencyResolver } from "../src/dependency-resolver.ts";
+import type { DependencyArtifactStore } from "../src/dependency-artifacts.ts";
 import type { EnvironmentManager } from "../src/environment-manager.ts";
 import type { ProjectRunner } from "../src/project-runner.ts";
 import type { TestRequestV2 } from "../src/contract.ts";
@@ -16,10 +18,22 @@ writeFileSync(
   join(workspace, "src/api.py"),
   "def health():\n    return True\n",
 );
-const artifact = {
-  sha256: digest("e"),
+const artifact = (
+  character: string,
+  media_type = "application/octet-stream",
+) => ({
+  sha256: digest(character),
   size: 1,
-  media_type: "application/octet-stream",
+  media_type,
+});
+const artifactBytes = Buffer.from("verified dependency artifact");
+const artifactDigest = createHash("sha256").update(artifactBytes).digest("hex");
+const artifactStore: DependencyArtifactStore = {
+  async read(sha256) {
+    if (sha256 !== artifactDigest)
+      throw new Error("unexpected artifact digest");
+    return artifactBytes;
+  },
 };
 let resolverCalls = 0;
 const resolver: DependencyResolver = {
@@ -39,12 +53,18 @@ const resolver: DependencyResolver = {
         packages: [],
         vulnerabilities: [],
       },
-      manifest: artifact,
-      lockfile: artifact,
-      dependency_layer: artifact,
-      sbom: artifact,
-      license_report: artifact,
-      vulnerability_report: artifact,
+      manifest: artifact(
+        "1",
+        "application/vnd.foundry.package-manifests.v1+json",
+      ),
+      lockfile: artifact(
+        "2",
+        "application/vnd.foundry.package-lockfiles.v1+json",
+      ),
+      dependency_layer: artifact("3"),
+      sbom: artifact("4"),
+      license_report: artifact("5"),
+      vulnerability_report: artifact("6"),
       error: null,
       failure_code: null,
     };
@@ -76,7 +96,7 @@ const environment: EnvironmentManager = {
       plan_digest: request.plan_digest,
       green: true,
       outcomes: [],
-      artifact,
+      artifact: artifact("e"),
     };
   },
   async snapshot(request) {
@@ -84,7 +104,7 @@ const environment: EnvironmentManager = {
       environment_id: request.environment_id,
       plan_digest: request.plan_digest,
       snapshot_digest: digest("5"),
-      artifact,
+      artifact: artifact("e"),
     };
   },
   async teardown(request) {
@@ -141,7 +161,7 @@ const projectRunner: ProjectRunner = {
         created_at_ms: 1,
       },
       measurements: { duration_ms: 2, memory_mb: 16 },
-      artifact,
+      artifact: artifact("e"),
       piston: { code: 0, signal: null, stdout: "", stderr: "" },
     };
   },
@@ -152,6 +172,7 @@ const server = createFoundryServer({
   authToken: "v2-test-token",
   workspaceRoot: workspace,
   dependencyResolver: resolver,
+  dependencyArtifactStore: artifactStore,
   environmentManager: environment,
   projectRunner,
   requireProtocolV2: true,
@@ -266,6 +287,7 @@ try {
   const readinessBody = (await readiness.json()) as {
     protocol_v2?: {
       dependency_resolver?: { ready?: boolean };
+      dependency_artifacts?: { ready?: boolean };
       environment_manager?: { ready?: boolean };
       project_runner?: { ready?: boolean };
     };
@@ -273,6 +295,7 @@ try {
   if (
     readiness.status !== 200 ||
     readinessBody.protocol_v2?.dependency_resolver?.ready !== true ||
+    readinessBody.protocol_v2.dependency_artifacts?.ready !== true ||
     readinessBody.protocol_v2.environment_manager?.ready !== true ||
     readinessBody.protocol_v2.project_runner?.ready !== true
   ) {
@@ -282,6 +305,20 @@ try {
     const response = await post("/v2/dependencies/resolve", resolution);
     if (response.status !== 200) failed = true;
     await response.text();
+  }
+  const unauthorizedArtifact = await fetch(
+    `${base}/v2/dependencies/artifacts/${artifactDigest}`,
+  );
+  if (unauthorizedArtifact.status !== 401) failed = true;
+  const downloadedArtifact = await fetch(
+    `${base}/v2/dependencies/artifacts/${artifactDigest}`,
+    { headers: { authorization: "Bearer v2-test-token" } },
+  );
+  if (
+    downloadedArtifact.status !== 200 ||
+    !Buffer.from(await downloadedArtifact.arrayBuffer()).equals(artifactBytes)
+  ) {
+    failed = true;
   }
   const started = await post("/v2/environments/start", environmentStart);
   if (started.status !== 200) failed = true;

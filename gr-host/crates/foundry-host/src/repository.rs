@@ -135,10 +135,10 @@ pub fn materialize_generated_resources(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContentArtifactRef {
-    sha256: String,
-    size: u64,
-    media_type: String,
+pub struct ContentArtifactRef {
+    pub sha256: String,
+    pub size: u64,
+    pub media_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +215,30 @@ pub fn materialize_dependency_resolution(
         .map_err(|error| error.to_string())?;
     std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
     Ok(vec![".foundry/dependencies/resolution.json".into()])
+}
+
+pub const PACKAGE_MANIFEST_BUNDLE_MEDIA_TYPE: &str =
+    "application/vnd.foundry.package-manifests.v1+json";
+pub const PACKAGE_LOCKFILE_BUNDLE_MEDIA_TYPE: &str =
+    "application/vnd.foundry.package-lockfiles.v1+json";
+
+pub fn dependency_file_artifacts(
+    result: &serde_json::Value,
+) -> Result<(ContentArtifactRef, ContentArtifactRef), String> {
+    let result: DependencyResolutionResult =
+        serde_json::from_value(result.clone()).map_err(|error| error.to_string())?;
+    let manifest = result
+        .manifest
+        .ok_or_else(|| "dependency resolution omitted its manifest bundle".to_string())?;
+    let lockfile = result
+        .lockfile
+        .ok_or_else(|| "dependency resolution omitted its lockfile bundle".to_string())?;
+    if manifest.media_type != PACKAGE_MANIFEST_BUNDLE_MEDIA_TYPE
+        || lockfile.media_type != PACKAGE_LOCKFILE_BUNDLE_MEDIA_TYPE
+    {
+        return Err("dependency file artifacts use unsupported media types".into());
+    }
+    Ok((manifest, lockfile))
 }
 
 pub trait RepositoryProvider {
@@ -527,6 +551,8 @@ impl PullRequestPublisher for GitHubRepositoryProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependency_files::materialize_native_dependency_files;
+    use sha2::{Digest, Sha256};
 
     fn dependency_resolution_result() -> serde_json::Value {
         let digest = |byte: char| byte.to_string().repeat(64);
@@ -557,8 +583,8 @@ mod tests {
                 }],
                 "vulnerabilities": []
             },
-            "manifest": artifact('1', "application/json"),
-            "lockfile": artifact('2', "application/json"),
+            "manifest": artifact('1', PACKAGE_MANIFEST_BUNDLE_MEDIA_TYPE),
+            "lockfile": artifact('2', PACKAGE_LOCKFILE_BUNDLE_MEDIA_TYPE),
             "dependency_layer": artifact('3', "application/vnd.oci.image.layer.v1.tar+gzip"),
             "sbom": artifact('4', "application/vnd.cyclonedx+json"),
             "license_report": artifact('5', "application/json"),
@@ -610,6 +636,158 @@ mod tests {
         let mut extended = dependency_resolution_result();
         extended["registry_token"] = serde_json::json!("forbidden");
         assert!(materialize_dependency_resolution(&worktree, &extended).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn dependency_bundle(kind: &str, path: &str, content: &[u8]) -> Vec<u8> {
+        dependency_bundle_files(kind, &[(path, content)])
+    }
+
+    fn dependency_bundle_files(kind: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        use base64::Engine as _;
+        serde_json::to_vec(&serde_json::json!({
+            "bundle_version": 1,
+            "kind": kind,
+            "files": files.iter().map(|(path, content)| serde_json::json!({
+                "path": path,
+                "sha256": format!("{:x}", Sha256::digest(content)),
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn native_dependency_bundles_cover_multiple_package_roots_exactly() {
+        let root = std::env::temp_dir().join(format!(
+            "foundry-multi-root-dependencies-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let worktree = RunWorktree {
+            path: root.clone(),
+            branch: "foundry/test".into(),
+            base_commit: "base".into(),
+        };
+        let mut ir: foundry_ir::IrV2 = serde_json::from_str(include_str!(
+            "../../../../ir/examples/service-stack.ir-v2.json"
+        ))
+        .unwrap();
+        let mut go_root = ir.package_roots[0].clone();
+        go_root.id = "go-service".into();
+        go_root.language = "go".into();
+        go_root.manifest_path = "services/go.mod".into();
+        go_root.lockfile_path = "services/go.sum".into();
+        ir.package_roots.push(go_root);
+        let manifests = dependency_bundle_files(
+            "manifest",
+            &[
+                ("package.json", b"{}"),
+                ("services/go.mod", b"module fixture"),
+            ],
+        );
+        let lockfiles = dependency_bundle_files(
+            "lockfile",
+            &[("package-lock.json", b"{}"), ("services/go.sum", b"")],
+        );
+        let paths =
+            materialize_native_dependency_files(&worktree, &ir, &manifests, &lockfiles).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                "package.json",
+                "services/go.mod",
+                "package-lock.json",
+                "services/go.sum"
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("services/go.mod")).unwrap(),
+            "module fixture"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_dependency_files_are_checksum_verified_and_never_overwritten() {
+        let root = std::env::temp_dir().join(format!(
+            "foundry-native-dependencies-{}",
+            std::process::id()
+        ));
+        let attempt = root.join("attempt");
+        std::fs::create_dir_all(&attempt).unwrap();
+        let worktree = RunWorktree {
+            path: attempt.clone(),
+            branch: "foundry/test".into(),
+            base_commit: "base".into(),
+        };
+        let ir: foundry_ir::IrV2 = serde_json::from_str(include_str!(
+            "../../../../ir/examples/service-stack.ir-v2.json"
+        ))
+        .unwrap();
+        let manifest = dependency_bundle("manifest", "package.json", br#"{"private":true}"#);
+        let lockfile =
+            dependency_bundle("lockfile", "package-lock.json", br#"{"lockfileVersion":3}"#);
+        let paths =
+            materialize_native_dependency_files(&worktree, &ir, &manifest, &lockfile).unwrap();
+        assert_eq!(paths, vec!["package.json", "package-lock.json"]);
+        materialize_native_dependency_files(&worktree, &ir, &manifest, &lockfile).unwrap();
+        std::fs::write(attempt.join("package-lock.json"), b"conflict").unwrap();
+        assert!(materialize_native_dependency_files(&worktree, &ir, &manifest, &lockfile).is_err());
+        assert_eq!(
+            std::fs::read(attempt.join("package-lock.json")).unwrap(),
+            b"conflict"
+        );
+        assert!(!root.join("package.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_dependency_bundle_rejects_wrong_paths_and_checksums() {
+        let root = std::env::temp_dir().join(format!(
+            "foundry-native-dependency-rejection-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let worktree = RunWorktree {
+            path: root.clone(),
+            branch: "foundry/test".into(),
+            base_commit: "base".into(),
+        };
+        let ir: foundry_ir::IrV2 = serde_json::from_str(include_str!(
+            "../../../../ir/examples/service-stack.ir-v2.json"
+        ))
+        .unwrap();
+        let wrong_path = dependency_bundle("manifest", "other.json", b"{}");
+        let lockfile = dependency_bundle("lockfile", "package-lock.json", b"{}");
+        assert!(
+            materialize_native_dependency_files(&worktree, &ir, &wrong_path, &lockfile).is_err()
+        );
+        let mut bad_checksum: serde_json::Value =
+            serde_json::from_slice(&dependency_bundle("manifest", "package.json", b"{}")).unwrap();
+        bad_checksum["files"][0]["sha256"] = serde_json::json!("0".repeat(64));
+        assert!(materialize_native_dependency_files(
+            &worktree,
+            &ir,
+            &serde_json::to_vec(&bad_checksum).unwrap(),
+            &lockfile,
+        )
+        .is_err());
+        assert!(!root.join("package.json").exists());
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join("outside.json"), b"do-not-touch").unwrap();
+            std::os::unix::fs::symlink(root.join("outside.json"), root.join("package.json"))
+                .unwrap();
+            let manifest = dependency_bundle("manifest", "package.json", b"do-not-touch");
+            assert!(
+                materialize_native_dependency_files(&worktree, &ir, &manifest, &lockfile).is_err()
+            );
+            assert_eq!(
+                std::fs::read(root.join("outside.json")).unwrap(),
+                b"do-not-touch"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

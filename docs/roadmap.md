@@ -216,6 +216,11 @@ Status: foundation and worker execution boundaries implemented; durable build or
   durable build writes `.foundry/dependencies/resolution.json` containing only the strict verified
   resolution result and content-addressed artifact metadata; incomplete results, unknown fields,
   and resolver errors fail closed before Git validation.
+- Implemented native dependency-file retrieval and promotion. The pinned resolver writes
+  content-addressed artifacts through a dedicated writable mount; the authenticated worker route
+  serves only bounded regular files whose bytes match their requested digest. The host verifies
+  transport and per-file hashes, accepts exact multi-root manifest/lockfile bundles, rejects unsafe
+  paths and secret-shaped content, preserves matching repository files, and refuses conflicts.
 - Implemented the IR v2 Studio semantic-edit boundary: complete typed package, resource,
   integration, secret-reference, binding, migration, and test-environment declaration batches are
   compiler-checked atomically, respect node boundary locks, change the semantic digest, and produce
@@ -226,10 +231,10 @@ Status: foundation and worker execution boundaries implemented; durable build or
   external-contract edits, compiler rejection leaves the head unchanged, and only a human edit
   capability may call `POST /v2/studios/:run_id/commands`. Existing v1 commands remain on their
   original route and reject v2 proposals explicitly rather than discarding declarations.
-- Remaining: deployable runner/controller images that retrieve and mount dependency artifacts,
+- Remaining: deployable resolver, runner, and controller images,
   cancellation-time environment reconciliation, the concrete Docker controller/emulator service
-  itself, native manifest/lockfile retrieval and complete environment/effect evidence
-  materialization in the worktree, and the broad polyglot restart acceptance fixture. Buzz now has
+  itself, complete environment/effect evidence materialization in the worktree, and the broad
+  polyglot restart acceptance fixture. Buzz now has
   typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
   expectation mutation forms plus dedicated managed-resource and third-party integration graph
   projections. IR v1 never projects ordinary dependencies into those views.

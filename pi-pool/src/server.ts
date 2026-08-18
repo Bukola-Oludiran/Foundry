@@ -58,6 +58,10 @@ import {
   type ProjectRunner,
   verifyProjectTestResult,
 } from "./project-runner.ts";
+import {
+  type DependencyArtifactStore,
+  FilesystemDependencyArtifactStore,
+} from "./dependency-artifacts.ts";
 
 function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -107,6 +111,17 @@ function send(res: ServerResponse, code: number, obj: unknown): void {
   res.end(s);
 }
 
+function sendBytes(res: ServerResponse, bytes: Buffer): void {
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": bytes.byteLength,
+    "cache-control": "private, max-age=31536000, immutable",
+    "content-disposition": "attachment",
+    "x-content-type-options": "nosniff",
+  });
+  res.end(bytes);
+}
+
 export interface FoundryServerOptions {
   llm: LlmClient;
   tester?: TesterConfig;
@@ -117,6 +132,7 @@ export interface FoundryServerOptions {
   requireSandbox?: boolean;
   idempotencyDir?: string;
   dependencyResolver?: DependencyResolver;
+  dependencyArtifactStore?: DependencyArtifactStore;
   environmentManager?: EnvironmentManager;
   projectRunner?: ProjectRunner;
   requireProtocolV2?: boolean;
@@ -309,6 +325,12 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
               reason: null,
             })
           : { ready: false, reason: "not configured" };
+        const dependencyArtifactStore = opts.dependencyArtifactStore
+          ? ((await opts.dependencyArtifactStore.readiness?.()) ?? {
+              ready: true,
+              reason: null,
+            })
+          : { ready: false, reason: "not configured" };
         const environmentManager = opts.environmentManager
           ? ((await opts.environmentManager.readiness?.()) ?? {
               ready: true,
@@ -325,6 +347,7 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
           (!opts.requireSandbox || sandbox.available) &&
           (!opts.requireProtocolV2 ||
             (dependencyResolver.ready &&
+              dependencyArtifactStore.ready &&
               environmentManager.ready &&
               projectRunner.ready));
         return send(res, ready ? 200 : 503, {
@@ -335,6 +358,7 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
           protocol_v2: {
             required: Boolean(opts.requireProtocolV2),
             dependency_resolver: dependencyResolver,
+            dependency_artifacts: dependencyArtifactStore,
             environment_manager: environmentManager,
             project_runner: projectRunner,
           },
@@ -348,6 +372,26 @@ export function createFoundryServer(opts: FoundryServerOptions): Server {
           401,
           "UNAUTHORIZED",
           "missing or invalid bearer token",
+        );
+      }
+      const artifactMatch = req.url?.match(
+        /^\/v2\/dependencies\/artifacts\/([a-f0-9]{64})$/,
+      );
+      if (req.method === "GET" && artifactMatch) {
+        if (!opts.dependencyArtifactStore) {
+          throw new RequestError(
+            503,
+            "ARTIFACT_STORE_NOT_CONFIGURED",
+            "dependency artifact storage is not configured",
+            true,
+          );
+        }
+        return sendBytes(
+          res,
+          await opts.dependencyArtifactStore.read(
+            artifactMatch[1]!,
+            AbortSignal.timeout(30_000),
+          ),
         );
       }
       if (req.method === "POST" && req.url === "/cancel") {
@@ -610,9 +654,16 @@ if (isMain) {
     const idempotencyDir = process.env.FOUNDRY_WORKER_STATE_DIR;
     const resolverNetwork = process.env.FOUNDRY_RESOLVER_NETWORK;
     const resolverProxy = process.env.FOUNDRY_REGISTRY_PROXY_URL;
-    if (Boolean(resolverNetwork) !== Boolean(resolverProxy)) {
+    const dependencyArtifactDir = process.env.FOUNDRY_DEPENDENCY_ARTIFACT_DIR;
+    if (
+      new Set([
+        Boolean(resolverNetwork),
+        Boolean(resolverProxy),
+        Boolean(dependencyArtifactDir),
+      ]).size !== 1
+    ) {
       throw new Error(
-        "FOUNDRY_RESOLVER_NETWORK and FOUNDRY_REGISTRY_PROXY_URL must be configured together",
+        "FOUNDRY_RESOLVER_NETWORK, FOUNDRY_REGISTRY_PROXY_URL, and FOUNDRY_DEPENDENCY_ARTIFACT_DIR must be configured together",
       );
     }
     const dependencyResolver =
@@ -620,8 +671,12 @@ if (isMain) {
         ? new OciDependencyResolver({
             network: resolverNetwork,
             proxyUrl: resolverProxy,
+            artifactDirectory: dependencyArtifactDir!,
           })
         : undefined;
+    const dependencyArtifactStore = dependencyArtifactDir
+      ? new FilesystemDependencyArtifactStore(dependencyArtifactDir)
+      : undefined;
     const environmentManagerUrl = process.env.FOUNDRY_ENVIRONMENT_MANAGER_URL;
     const environmentManagerToken =
       process.env.FOUNDRY_ENVIRONMENT_MANAGER_TOKEN;
@@ -671,6 +726,7 @@ if (isMain) {
       requireSandbox: !allowUnauthenticated,
       idempotencyDir,
       dependencyResolver,
+      dependencyArtifactStore,
       environmentManager,
       projectRunner,
       requireProtocolV2: process.env.FOUNDRY_REQUIRE_PROTOCOL_V2 === "1",

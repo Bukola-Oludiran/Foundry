@@ -163,16 +163,24 @@ contains only credential-free HTTPS registry origins and a fail-closed license/v
 
 The worker has no host-package-manager fallback. If an operator has not installed a resolver that
 enforces the registry network boundary, it returns `RESOLVER_NOT_CONFIGURED`. A configured resolver
-must return native manifest and lockfile, dependency layer, CycloneDX SBOM, license report, and
-vulnerability report artifacts. The worker independently verifies every returned package coordinate
-and integrity against the accepted plan, rejects undeclared packages or drift, and applies the
-license and vulnerability policy before acknowledging the durable effect.
+must return native manifest and lockfile bundles, dependency layer, CycloneDX SBOM, license report,
+and vulnerability report artifacts. Manifest and lockfile bundles use the versioned
+`DependencyFileBundleV1` JSON envelope, contain exactly one accepted path per package root, and bind
+each base64 payload to its own SHA-256 digest. The worker independently verifies every returned
+package coordinate and integrity against the accepted plan, rejects undeclared packages or drift,
+and applies the license and vulnerability policy before acknowledging the durable effect.
 
-The bundled OCI adapter is enabled only when both `FOUNDRY_RESOLVER_NETWORK` and
-`FOUNDRY_REGISTRY_PROXY_URL` are set. The network must already exist with Docker's `Internal` flag;
+The bundled OCI adapter is enabled only when `FOUNDRY_RESOLVER_NETWORK`,
+`FOUNDRY_REGISTRY_PROXY_URL`, and `FOUNDRY_DEPENDENCY_ARTIFACT_DIR` are all set. The network must
+already exist with Docker's `Internal` flag;
 the proxy URL must contain no credentials. The adapter uses a read-only root, drops all capabilities,
 sets no-new-privileges, applies PID/CPU/memory/time/output bounds, mounts the isolated worktree
-read-only, and invokes the digest-pinned image without a shell. Set
+read-only, mounts the content-addressed artifact directory at `/artifacts`, and invokes the
+digest-pinned image without a shell. The authenticated
+`GET /v2/dependencies/artifacts/:sha256` route returns only regular files whose bytes match the
+requested digest and 16 MiB bound. Foundry verifies the transport digest again, validates the
+bundle paths against the accepted IR, and refuses to replace a conflicting committed manifest or
+lockfile. Set
 `FOUNDRY_REQUIRE_PROTOCOL_V2=1` to make worker readiness depend on the resolver, environment
 manager, and OCI project runner.
 

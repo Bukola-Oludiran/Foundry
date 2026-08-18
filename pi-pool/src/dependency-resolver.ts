@@ -6,6 +6,8 @@ import type {
 } from "./contract.ts";
 import { RequestError } from "./validation.ts";
 import { BoundedProcessRunner, type ProcessRunner } from "./process-runner.ts";
+import { isAbsolute } from "node:path";
+import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 
 /**
  * Execution boundary for a pinned, policy-enforcing dependency resolver.
@@ -28,6 +30,7 @@ export interface OciDependencyResolverOptions {
   runner?: ProcessRunner;
   dockerCommand?: string;
   resolverCommand?: string;
+  artifactDirectory: string;
 }
 
 function safeDockerName(value: string, label: string): string {
@@ -66,6 +69,7 @@ export class OciDependencyResolver implements DependencyResolver {
   private readonly runner: ProcessRunner;
   private readonly docker: string;
   private readonly resolverCommand: string;
+  private readonly artifactDirectory: string;
 
   constructor(options: OciDependencyResolverOptions) {
     this.network = safeDockerName(options.network, "resolver network");
@@ -77,6 +81,22 @@ export class OciDependencyResolver implements DependencyResolver {
     if (!this.resolverCommand.startsWith("/")) {
       throw new Error("resolver command must be an absolute container path");
     }
+    if (
+      !isAbsolute(options.artifactDirectory) ||
+      /[\r\n,]/.test(options.artifactDirectory)
+    ) {
+      throw new Error(
+        "resolver artifact directory must be a safe absolute path",
+      );
+    }
+    mkdirSync(options.artifactDirectory, { recursive: true, mode: 0o700 });
+    const artifactMetadata = lstatSync(options.artifactDirectory);
+    if (!artifactMetadata.isDirectory() || artifactMetadata.isSymbolicLink()) {
+      throw new Error(
+        "resolver artifact directory must be a regular directory",
+      );
+    }
+    this.artifactDirectory = realpathSync(options.artifactDirectory);
   }
 
   async readiness(): Promise<{ ready: boolean; reason: string | null }> {
@@ -159,6 +179,10 @@ export class OciDependencyResolver implements DependencyResolver {
       "NO_PROXY=",
       "--mount",
       `type=bind,src=${request.workspace},dst=/workspace,readonly`,
+      "--mount",
+      `type=bind,src=${this.artifactDirectory},dst=/artifacts`,
+      "--env",
+      "FOUNDRY_ARTIFACT_DIR=/artifacts",
       "--tmpfs",
       "/tmp:rw,noexec,nosuid,size=128m",
       request.resolver_image,
@@ -448,6 +472,32 @@ export function verifyDependencyResolutionResult(
     licenseReport,
     vulnerabilityReport,
   ] = normalizedArtifacts;
+  if (
+    manifest!.media_type !==
+      "application/vnd.foundry.package-manifests.v1+json" ||
+    lockfile!.media_type !==
+      "application/vnd.foundry.package-lockfiles.v1+json" ||
+    manifest!.size > 16 * 1024 * 1024 ||
+    lockfile!.size > 16 * 1024 * 1024
+  ) {
+    throw new RequestError(
+      502,
+      "RESOLUTION_EVIDENCE_INVALID",
+      "dependency file bundles use an unsupported media type or size",
+    );
+  }
+  if (
+    manifest!.sha256 !== evidence.manifest_sha256 ||
+    lockfile!.sha256 !== evidence.lockfile_sha256 ||
+    dependencyLayer!.sha256 !== evidence.dependency_layer_sha256 ||
+    sbom!.sha256 !== evidence.sbom_sha256
+  ) {
+    throw new RequestError(
+      502,
+      "RESOLUTION_EVIDENCE_INVALID",
+      "supply-chain artifact identities do not match resolver evidence",
+    );
+  }
   return {
     ok: true,
     evidence: {

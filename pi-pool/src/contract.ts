@@ -32,6 +32,16 @@ export interface ContentArtifact {
   media_type: string;
 }
 
+export interface DependencyFileBundleV1 {
+  bundle_version: 1;
+  kind: "manifest" | "lockfile";
+  files: Array<{
+    path: string;
+    sha256: string;
+    content_base64: string;
+  }>;
+}
+
 export interface ArchitectureRequest {
   architecture_version: 1;
   product_spec: string;
