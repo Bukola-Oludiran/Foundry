@@ -12,6 +12,7 @@ pub mod generated;
 pub mod resolution;
 pub mod revision;
 pub mod studio;
+pub mod studio_v2;
 pub mod types;
 pub mod v2;
 
@@ -43,6 +44,10 @@ pub use studio::{
     HumanArchitectureApprovalV1, LayoutPointV1, ProposalStatusV1, RationaleEntryV1,
     StudioBindingV1, StudioCommandErrorV1, StudioCommandOutcomeV1, StudioCommandV1,
     StudioOperationV1, StudioRationaleV1, StudioRevisionPhaseV1,
+};
+pub use studio_v2::{
+    apply_external_studio_command_v2, studio_v2_semantic_digest, StudioExternalCommandOutcomeV2,
+    StudioExternalCommandV2, StudioExternalOperationV2,
 };
 pub use types::{ArchitectureRequest, Interface, Ir, Kind, Node, Operation, TestBundle};
 pub use v2::{ir_v2_digest, IrDocument, IrV2};

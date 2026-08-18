@@ -212,7 +212,13 @@ Status: foundation and worker execution boundaries implemented; durable build or
   `.foundry/resources/manifest.json` preserves the deployment-neutral plan and logical secret
   bindings, while `docker-compose.yml` uses digest-image environment references, an internal-only
   network, read-only services, dropped capabilities, and no published host ports or credentials.
+- Implemented the IR v2 Studio semantic-edit boundary: complete typed package, resource,
+  integration, secret-reference, binding, migration, and test-environment declaration batches are
+  compiler-checked atomically, respect node boundary locks, change the semantic digest, and produce
+  a deterministic rebuild closure. Buzz has matching version-discriminated models, node badges,
+  and read projections for these contracts without reinterpreting IR v1.
 - Remaining: deployable runner/controller images that retrieve and mount dependency artifacts,
-  cancellation-time environment reconciliation, the concrete Docker controller/emulator service itself, complete
-  supply-chain/effect evidence materialization in the worktree, Studio editors/projections,
-  generated Compose/manifests, and the broad polyglot restart acceptance fixture.
+  cancellation-time environment reconciliation, the concrete Docker controller/emulator service
+  itself, complete supply-chain/effect evidence materialization in the worktree, Studio persistence
+  and HTTP wiring for IR v2 commands, typed Buzz mutation forms and external graph projections, and
+  the broad polyglot restart acceptance fixture.
