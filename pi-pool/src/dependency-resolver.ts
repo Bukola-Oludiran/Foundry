@@ -31,6 +31,7 @@ export interface OciDependencyResolverOptions {
   dockerCommand?: string;
   resolverCommand?: string;
   artifactDirectory: string;
+  catalogDirectory?: string;
 }
 
 function safeDockerName(value: string, label: string): string {
@@ -70,6 +71,7 @@ export class OciDependencyResolver implements DependencyResolver {
   private readonly docker: string;
   private readonly resolverCommand: string;
   private readonly artifactDirectory: string;
+  private readonly catalogDirectory?: string;
 
   constructor(options: OciDependencyResolverOptions) {
     this.network = safeDockerName(options.network, "resolver network");
@@ -97,6 +99,24 @@ export class OciDependencyResolver implements DependencyResolver {
       );
     }
     this.artifactDirectory = realpathSync(options.artifactDirectory);
+    if (options.catalogDirectory) {
+      if (
+        !isAbsolute(options.catalogDirectory) ||
+        /[\r\n,]/.test(options.catalogDirectory)
+      ) {
+        throw new Error(
+          "resolver catalog directory must be a safe absolute path",
+        );
+      }
+      const catalog = realpathSync(options.catalogDirectory);
+      const metadata = lstatSync(catalog);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error(
+          "resolver catalog directory must be a regular directory",
+        );
+      }
+      this.catalogDirectory = catalog;
+    }
   }
 
   async readiness(): Promise<{ ready: boolean; reason: string | null }> {
@@ -185,9 +205,18 @@ export class OciDependencyResolver implements DependencyResolver {
       "FOUNDRY_ARTIFACT_DIR=/artifacts",
       "--tmpfs",
       "/tmp:rw,noexec,nosuid,size=128m",
-      request.resolver_image,
-      this.resolverCommand,
     ];
+    if (this.catalogDirectory) {
+      args.push(
+        "--mount",
+        `type=bind,src=${this.catalogDirectory},dst=/catalog,readonly`,
+        "--env",
+        "FOUNDRY_RESOLUTION_CATALOG=/catalog/index.json",
+        "--env",
+        "FOUNDRY_RESOLUTION_CATALOG_ARTIFACTS=/catalog/artifacts",
+      );
+    }
+    args.push(request.resolver_image, this.resolverCommand);
     const execution = await this.runner.run(this.docker, args, {
       input: JSON.stringify(request),
       timeoutMs: request.resource_policy.timeout_ms,

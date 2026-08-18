@@ -204,6 +204,12 @@ Status: foundation and worker execution boundaries implemented; durable build or
   credential-free error surfaces. Worker protocol v2 `/build` and `/test` now strictly accept and
   validate dependency layers, resource/integration bindings, secret handles, environment snapshots,
   and migration phase while preserving strict v1 behavior.
+- Implemented the first concrete operator runtime services. The Docker controller creates and
+  adopts deterministic internal networks, hardened declared resource/emulator containers, applies
+  ordered repeat-checked PostgreSQL migrations, and records content-addressed lifecycle evidence
+  without persisting credential values. The project-runner service executes each v2 test in a fresh
+  constrained language container and safely projects verified dependency archives. Controller,
+  deterministic emulator, and project-runner Dockerfiles use a checked-in digest lock.
 - Implemented durable IR v2 build orchestration: `build` compiles either explicit IR version,
   resolves packages, starts and health-checks the declared private environment, applies migrations,
   snapshots it, gates node admission on the verified preflight, binds exact dependency/environment
@@ -241,10 +247,14 @@ Status: foundation and worker execution boundaries implemented; durable build or
   external-contract edits, compiler rejection leaves the head unchanged, and only a human edit
   capability may call `POST /v2/studios/:run_id/commands`. Existing v1 commands remain on their
   original route and reject v2 proposals explicitly rather than discarding declarations.
-- Remaining: deployable resolver, runner, and controller images,
-  the concrete Docker controller/emulator service itself, contract-test/resource-usage evidence
-  linkage, and the broad
-  polyglot restart acceptance fixture. Buzz now has
+- Implemented deployable, digest-pinned runtime images for the environment controller, deterministic
+  integration emulator, dependency-aware project runner, and fail-closed catalog-backed polyglot
+  resolver. The authenticated services use bounded strict protocol-v2 requests; runtime workloads
+  are isolated on exact internal networks, and supply-chain artifacts are independently verified
+  before promotion.
+- Remaining: contract-test/resource-usage evidence linkage and the broad polyglot restart
+  acceptance fixture, including live-Docker controller/emulator coverage and operator catalog
+  generation. Buzz now has
   typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
   expectation mutation forms plus dedicated managed-resource and third-party integration graph
   projections. IR v1 never projects ordinary dependencies into those views.

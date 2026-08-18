@@ -1,0 +1,13 @@
+{
+  "lock_version": 1,
+  "images": {
+    "node_runtime": "docker.io/library/node@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019",
+    "docker_cli": "docker.io/library/docker@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c"
+  },
+  "targets": {
+    "dependency_resolver": "pi-pool/runtime/images/Dockerfile.dependency-resolver",
+    "environment_controller": "pi-pool/runtime/images/Dockerfile.environment-controller",
+    "integration_emulator": "pi-pool/runtime/images/Dockerfile.integration-emulator",
+    "project_runner": "pi-pool/runtime/images/Dockerfile.project-runner"
+  }
+}

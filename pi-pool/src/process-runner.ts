@@ -17,6 +17,8 @@ export interface ProcessRunner {
       timeoutMs: number;
       maxOutputBytes: number;
       signal?: AbortSignal;
+      cwd?: string;
+      env?: Record<string, string>;
     },
   ): Promise<ProcessResult>;
 }
@@ -31,13 +33,16 @@ export class BoundedProcessRunner implements ProcessRunner {
       timeoutMs: number;
       maxOutputBytes: number;
       signal?: AbortSignal;
+      cwd?: string;
+      env?: Record<string, string>;
     },
   ): Promise<ProcessResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         stdio: ["pipe", "pipe", "pipe"],
         shell: false,
-        env: { PATH: process.env.PATH ?? "" },
+        cwd: options.cwd,
+        env: { PATH: process.env.PATH ?? "", ...options.env },
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];

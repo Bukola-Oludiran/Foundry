@@ -655,6 +655,12 @@ if (isMain) {
     const resolverNetwork = process.env.FOUNDRY_RESOLVER_NETWORK;
     const resolverProxy = process.env.FOUNDRY_REGISTRY_PROXY_URL;
     const dependencyArtifactDir = process.env.FOUNDRY_DEPENDENCY_ARTIFACT_DIR;
+    const resolverCatalogDir = process.env.FOUNDRY_RESOLUTION_CATALOG_DIR;
+    if (resolverCatalogDir && !resolverNetwork) {
+      throw new Error(
+        "FOUNDRY_RESOLUTION_CATALOG_DIR requires the OCI resolver configuration",
+      );
+    }
     if (
       new Set([
         Boolean(resolverNetwork),
@@ -672,6 +678,7 @@ if (isMain) {
             network: resolverNetwork,
             proxyUrl: resolverProxy,
             artifactDirectory: dependencyArtifactDir!,
+            catalogDirectory: resolverCatalogDir,
           })
         : undefined;
     const dependencyArtifactStore = dependencyArtifactDir

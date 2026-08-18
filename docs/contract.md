@@ -180,8 +180,15 @@ digest-pinned image without a shell. The authenticated
 `GET /v2/dependencies/artifacts/:sha256` route returns only regular files whose bytes match the
 requested digest and 16 MiB bound. Foundry verifies the transport digest again, validates the
 bundle paths against the accepted IR, and refuses to replace a conflicting committed manifest or
-lockfile. Set
-`FOUNDRY_REQUIRE_PROTOCOL_V2=1` to make worker readiness depend on the resolver, environment
+lockfile.
+
+The repository also ships a non-root resolver image. When
+`FOUNDRY_RESOLUTION_CATALOG_DIR` is configured, that image accepts only an exact, pre-vetted entry
+for the submitted plan digest, revalidates its supply-chain evidence, and copies checksum-verified
+artifacts from the read-only catalog to the dedicated artifact mount. Missing or malformed catalog
+entries fail closed; registry resolution used to create that catalog remains an operator-controlled
+supply-chain action.
+Set `FOUNDRY_REQUIRE_PROTOCOL_V2=1` to make worker readiness depend on the resolver, environment
 manager, and OCI project runner.
 
 `foundry-host resources plan --ir <file>` emits a digest-bound, deployment-neutral private test
@@ -206,6 +213,14 @@ queries, or fragments are rejected. The bearer token must contain at least 32 ch
 inside the worker process. Controller responses are bounded to 1 MiB and upstream error bodies are
 never copied into worker errors. The controller is an operator deployment boundary: Foundry does
 not mount a Docker socket into ordinary worker jobs.
+
+The checked-in operator implementation and locked image definitions live under
+`pi-pool/src/runtime` and `pi-pool/runtime`. It creates deterministic internal networks and
+hardened resource/emulator containers, persists only credential-free adoption state, executes
+ordered PostgreSQL migrations, and emits content-addressed lifecycle evidence. The accompanying
+project runner launches every protocol-v2 test in a fresh digest-pinned language container with a
+read-only job/dependency projection and exactly `none` or the accepted private environment network.
+See `docs/runtime-services.md` for deployment and configuration.
 
 Protocol v2 `/build` and `/test` requests extend the unchanged v1 contracts with a verified
 dependency-layer reference, or `null` for a node that declares no packages. Builds additionally carry node-scoped resource and integration

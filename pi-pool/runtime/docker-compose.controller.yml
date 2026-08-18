@@ -1,0 +1,64 @@
+services:
+  environment-controller:
+    build:
+      context: ../..
+      dockerfile: pi-pool/runtime/images/Dockerfile.environment-controller
+    image: ${FOUNDRY_ENVIRONMENT_CONTROLLER_IMAGE:?set a locally built digest-tagged image}
+    environment:
+      FOUNDRY_ENVIRONMENT_CONTROLLER_TOKEN: ${FOUNDRY_ENVIRONMENT_CONTROLLER_TOKEN:?required}
+      FOUNDRY_WORKSPACE_ROOT: /workspaces
+      FOUNDRY_CONTROLLER_STATE_DIR: /var/lib/foundry/state
+      FOUNDRY_CONTROLLER_ARTIFACT_DIR: /var/lib/foundry/artifacts
+    volumes:
+      - ${FOUNDRY_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${FOUNDRY_WORKSPACE_ROOT:?required}:/workspaces:ro
+      - foundry-controller-state:/var/lib/foundry/state
+      - foundry-controller-artifacts:/var/lib/foundry/artifacts
+    group_add:
+      - ${FOUNDRY_DOCKER_GID:?set the Docker socket group ID}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    networks: [foundry-control]
+    restart: unless-stopped
+
+  project-runner:
+    build:
+      context: ../..
+      dockerfile: pi-pool/runtime/images/Dockerfile.project-runner
+    image: ${FOUNDRY_PROJECT_RUNNER_IMAGE:?set a locally built digest-tagged image}
+    environment:
+      FOUNDRY_PROJECT_RUNNER_TOKEN: ${FOUNDRY_PROJECT_RUNNER_TOKEN:?required}
+      FOUNDRY_WORKSPACE_ROOT: /workspaces
+      FOUNDRY_RUNNER_JOB_DIR: /var/lib/foundry/jobs
+      FOUNDRY_RUNNER_HOST_JOB_DIR: ${FOUNDRY_RUNNER_HOST_JOB_DIR:?required}
+      FOUNDRY_DEPENDENCY_ARTIFACT_DIR: /var/lib/foundry/dependencies
+      FOUNDRY_RUNNER_ARTIFACT_DIR: /var/lib/foundry/results
+    volumes:
+      - ${FOUNDRY_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${FOUNDRY_WORKSPACE_ROOT:?required}:/workspaces:ro
+      - ${FOUNDRY_RUNNER_HOST_JOB_DIR:?required}:/var/lib/foundry/jobs
+      - ${FOUNDRY_DEPENDENCY_ARTIFACT_DIR:?required}:/var/lib/foundry/dependencies:ro
+      - foundry-runner-results:/var/lib/foundry/results
+    group_add:
+      - ${FOUNDRY_DOCKER_GID:?set the Docker socket group ID}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    networks: [foundry-control]
+    restart: unless-stopped
+
+networks:
+  foundry-control:
+    internal: true
+
+volumes:
+  foundry-controller-state: {}
+  foundry-controller-artifacts: {}
+  foundry-runner-results: {}

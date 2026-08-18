@@ -29,7 +29,7 @@ export interface TesterConfig {
   pistonUrl?: string;
 }
 
-interface PFile {
+export interface PFile {
   name: string;
   content: string;
 }
@@ -81,7 +81,7 @@ function withArtifact(
 }
 
 /** Flatten module-under-test + deps + generated runner (runner is files[0] = the main file). */
-function assembleFiles(
+export function assembleTestFiles(
   req: TestRequest | TestRequestV2,
   backend: LanguageBackend,
 ): PFile[] {
@@ -107,7 +107,7 @@ function assembleFiles(
 }
 
 /** Map a run's stdout (+ raw stage) to a verdict — shared by both executors. */
-function toResult(
+export function testResultFromExecution(
   req: TestRequest | TestRequestV2,
   stdout: string,
   piston: TestResult["piston"],
@@ -169,7 +169,7 @@ function runLocal(
         (req.acceptance.perf?.time_ms ?? 3000) + 2000,
       ),
     });
-    return toResult(
+    return testResultFromExecution(
       req,
       proc.stdout ?? "",
       {
@@ -271,7 +271,7 @@ async function runOnPiston(
     });
   }
   const run = data.run;
-  return toResult(
+  return testResultFromExecution(
     req,
     run.stdout ?? "",
     {
@@ -289,7 +289,7 @@ export async function executeTest(
   cfg: TesterConfig = { mode: "local" },
 ): Promise<TestResult> {
   const backend = languageBackend(req.language);
-  const files = assembleFiles(req, backend);
+  const files = assembleTestFiles(req, backend);
   if (cfg.mode === "piston")
     return runOnPiston(req, files, cfg.pistonUrl ?? "http://127.0.0.1:2000");
   return runLocal(req, files, backend);

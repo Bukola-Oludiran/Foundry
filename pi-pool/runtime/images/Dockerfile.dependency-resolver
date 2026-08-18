@@ -1,0 +1,10 @@
+FROM docker.io/library/node@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019
+
+WORKDIR /app
+COPY pi-pool/src ./src
+COPY pi-pool/runtime/foundry-resolver.mjs /usr/local/bin/foundry-resolver
+RUN chmod 0555 /usr/local/bin/foundry-resolver
+
+USER 65532:65532
+ENTRYPOINT []
+CMD ["/usr/local/bin/foundry-resolver"]
