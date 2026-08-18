@@ -221,6 +221,11 @@ Status: foundation and worker execution boundaries implemented; durable build or
   serves only bounded regular files whose bytes match their requested digest. The host verifies
   transport and per-file hashes, accepts exact multi-root manifest/lockfile bundles, rejects unsafe
   paths and secret-shaped content, preserves matching repository files, and refuses conflicts.
+- Implemented recovered resource-lifecycle evidence materialization. Health, required migration,
+  snapshot, and teardown records are committed as durable scheduler state, verified to share one
+  exact environment/plan identity, bounded and redacted, then recovery-safely written to
+  `.foundry/resources/evidence.json`. Non-green, incomplete, unknown-field, secret-shaped, or
+  conflicting replay output fails closed before Git validation.
 - Implemented the IR v2 Studio semantic-edit boundary: complete typed package, resource,
   integration, secret-reference, binding, migration, and test-environment declaration batches are
   compiler-checked atomically, respect node boundary locks, change the semantic digest, and produce
@@ -233,7 +238,7 @@ Status: foundation and worker execution boundaries implemented; durable build or
   original route and reject v2 proposals explicitly rather than discarding declarations.
 - Remaining: deployable resolver, runner, and controller images,
   cancellation-time environment reconciliation, the concrete Docker controller/emulator service
-  itself, complete environment/effect evidence materialization in the worktree, and the broad
+  itself, contract-test/resource-usage evidence linkage, and the broad
   polyglot restart acceptance fixture. Buzz now has
   typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
   expectation mutation forms plus dedicated managed-resource and third-party integration graph

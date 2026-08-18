@@ -42,16 +42,54 @@ pub struct V2ExecutionPlan {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DurableBuildOutcome {
     pub dependency_resolution: Option<Value>,
+    pub environment_evidence: Option<DurableEnvironmentEvidence>,
 }
 
-fn durable_build_outcome(scheduler: &Scheduler) -> DurableBuildOutcome {
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableEnvironmentEvidence {
+    pub health: Value,
+    pub migrations: Option<Value>,
+    pub migrations_required: bool,
+    pub snapshot: Value,
+    pub teardown: Value,
+}
+
+fn durable_build_outcome(
+    scheduler: &Scheduler,
+    plan: Option<&V2ExecutionPlan>,
+) -> DurableBuildOutcome {
     let state = scheduler.snapshot_durable_state();
     let values = state.nodes.get(V2_PREFLIGHT_NODE);
+    let environment_exists = values
+        .and_then(|values| values.get("environment_handle"))
+        .is_some_and(|value| !value.is_null());
+    let migrations_required = plan
+        .and_then(|plan| plan.migrations.as_array())
+        .is_some_and(|migrations| !migrations.is_empty());
     DurableBuildOutcome {
         dependency_resolution: values
             .and_then(|values| values.get("dependency_result"))
             .filter(|value| !value.is_null())
             .cloned(),
+        environment_evidence: environment_exists.then(|| DurableEnvironmentEvidence {
+            health: values
+                .and_then(|values| values.get("environment_health"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            migrations: values
+                .and_then(|values| values.get("migration_result"))
+                .filter(|value| !value.is_null())
+                .cloned(),
+            migrations_required,
+            snapshot: values
+                .and_then(|values| values.get("environment_snapshot"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            teardown: values
+                .and_then(|values| values.get("environment_teardown"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        }),
     }
 }
 
@@ -189,7 +227,10 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
         let failure = use_durable_state("failure", Value::Null);
         let dependency_result = use_durable_state("dependency_result", Value::Null);
         let environment_handle = use_durable_state("environment_handle", Value::Null);
+        let environment_health = use_durable_state("environment_health", Value::Null);
+        let migration_result = use_durable_state("migration_result", Value::Null);
         let environment_snapshot = use_durable_state("environment_snapshot", Value::Null);
+        let environment_teardown = use_durable_state("environment_teardown", Value::Null);
         let effect = use_durable_effect();
         let artifact = use_durable_artifact();
 
@@ -334,6 +375,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
                 phase.set(json!("failed"));
                 return;
             }
+            environment_health.set(message.payload.clone());
             let handle = environment_handle.get();
             let mut input = json!({
                 "protocol_version": 2,
@@ -391,6 +433,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
                 phase.set(json!("failed"));
                 return;
             }
+            migration_result.set(message.payload.clone());
             let _ = migration_artifact(DurableArtifactRequest {
                 logical_name: "migration-results.json".into(),
                 media_type: "application/vnd.foundry.migration-results.v1+json".into(),
@@ -513,6 +556,7 @@ fn v2_preflight_definition(plan: V2ExecutionPlan) -> NodeDefinition {
                 .and_then(Value::as_bool)
                 == Some(true)
             {
+                environment_teardown.set(message.payload.clone());
                 phase.set(json!(
                     if phase.get().as_str() == Some("tearing_down_after_failure") {
                         "failed_cleaned"
@@ -1197,7 +1241,7 @@ pub fn run(
     println!("  durable run: {} ({:?})", run.run_id, run.status);
     if run.status.is_terminal() {
         return match run.status {
-            RunStatus::Succeeded => Ok(durable_build_outcome(&scheduler)),
+            RunStatus::Succeeded => Ok(durable_build_outcome(&scheduler, v2.as_ref())),
             _ => Err(format!("durable run is already terminal: {:?}", run.status)),
         };
     }
@@ -1342,7 +1386,7 @@ pub fn run(
             ))
             .map_err(|error| error.to_string())?;
             println!("✅ durable build: ALL GREEN");
-            return Ok(durable_build_outcome(&scheduler));
+            return Ok(durable_build_outcome(&scheduler, v2.as_ref()));
         }
         if let Some((node, _)) = phases
             .iter()

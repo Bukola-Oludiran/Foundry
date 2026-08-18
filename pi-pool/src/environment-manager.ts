@@ -11,6 +11,75 @@ import type {
 import { RequestError } from "./validation.ts";
 
 type Fetcher = typeof fetch;
+const DIGEST = /^[a-f0-9]{64}$/;
+const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}$/;
+
+function exactKeys(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).some((key) => !keys.includes(key))
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      `${label} has an invalid shape`,
+    );
+  }
+}
+
+function safeEvidenceText(
+  value: unknown,
+  label: string,
+  maxLength: number,
+): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length > maxLength) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      `${label} is not bounded text`,
+    );
+  }
+  if (
+    /(?:bearer\s+|authorization|cookie|password|private[_ -]?key|nsec1|ghp_|github_pat_)/i.test(
+      value,
+    )
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      `${label} contains secret-shaped material`,
+    );
+  }
+  return value;
+}
+
+function verifyArtifact(value: unknown, label: string): void {
+  exactKeys(value, ["sha256", "size", "media_type"], label);
+  if (
+    typeof value.sha256 !== "string" ||
+    !DIGEST.test(value.sha256) ||
+    typeof value.size !== "number" ||
+    !Number.isSafeInteger(value.size) ||
+    value.size < 0 ||
+    value.size > 1024 * 1024 * 1024 ||
+    typeof value.media_type !== "string" ||
+    !value.media_type ||
+    value.media_type.length > 200
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      `${label} has invalid artifact metadata`,
+    );
+  }
+}
 
 export interface HttpEnvironmentManagerOptions {
   baseUrl: string;
@@ -271,7 +340,48 @@ export function verifyEnvironmentHealth(
   request: EnvironmentActionRequestV2,
   health: EnvironmentHealthV2,
 ): EnvironmentHealthV2 {
+  exactKeys(
+    health,
+    ["environment_id", "plan_digest", "healthy", "services"],
+    "environment health",
+  );
   assertBound(request, health);
+  if (
+    typeof health.healthy !== "boolean" ||
+    !Array.isArray(health.services) ||
+    health.services.length > 256
+  ) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      "environment health is malformed or oversized",
+    );
+  }
+  const seen = new Set<string>();
+  for (const service of health.services) {
+    exactKeys(service, ["id", "healthy", "detail"], "service health");
+    if (
+      typeof service.id !== "string" ||
+      !SAFE_ID.test(service.id) ||
+      seen.has(service.id) ||
+      typeof service.healthy !== "boolean"
+    ) {
+      throw new RequestError(
+        502,
+        "ENVIRONMENT_EVIDENCE_INVALID",
+        "service health identity or state is invalid",
+      );
+    }
+    seen.add(service.id);
+    safeEvidenceText(service.detail, "service health detail", 512);
+  }
+  if (health.healthy && health.services.some((service) => !service.healthy)) {
+    throw new RequestError(
+      502,
+      "ENVIRONMENT_EVIDENCE_INVALID",
+      "green environment health contains an unhealthy service",
+    );
+  }
   return health;
 }
 
@@ -279,18 +389,51 @@ export function verifyMigrationResult(
   request: ApplyMigrationsRequestV2,
   result: MigrationResultV2,
 ): MigrationResultV2 {
+  exactKeys(
+    result,
+    ["environment_id", "plan_digest", "green", "outcomes", "artifact"],
+    "migration result",
+  );
   assertBound(request, result);
+  if (typeof result.green !== "boolean" || !Array.isArray(result.outcomes)) {
+    throw new RequestError(
+      502,
+      "MIGRATION_EVIDENCE_INVALID",
+      "migration result is malformed",
+    );
+  }
   const expected = new Map(
     request.migrations.map((migration) => [migration.resource_id, migration]),
   );
+  const seen = new Set<string>();
   if (
     result.outcomes.length !== expected.size ||
     result.outcomes.some((outcome) => {
+      exactKeys(
+        outcome,
+        [
+          "resource_id",
+          "owner_node",
+          "migration_digest",
+          "applied",
+          "repeatable_verified",
+          "duration_ms",
+          "diagnostic",
+        ],
+        "migration outcome",
+      );
       const migration = expected.get(outcome.resource_id);
       return (
         !migration ||
+        seen.has(outcome.resource_id) ||
+        !seen.add(outcome.resource_id) ||
         outcome.owner_node !== migration.owner_node ||
         !/^[a-f0-9]{64}$/.test(outcome.migration_digest) ||
+        typeof outcome.applied !== "boolean" ||
+        typeof outcome.repeatable_verified !== "boolean" ||
+        !Number.isSafeInteger(outcome.duration_ms) ||
+        outcome.duration_ms < 0 ||
+        outcome.duration_ms > 86_400_000 ||
         (migration.require_repeatable && !outcome.repeatable_verified)
       );
     })
@@ -308,6 +451,10 @@ export function verifyMigrationResult(
       "one or more declared migrations did not reach green",
     );
   }
+  for (const outcome of result.outcomes) {
+    safeEvidenceText(outcome.diagnostic, "migration diagnostic", 1024);
+  }
+  verifyArtifact(result.artifact, "migration artifact");
   return result;
 }
 
@@ -315,14 +462,20 @@ export function verifyEnvironmentSnapshot(
   request: EnvironmentActionRequestV2,
   snapshot: EnvironmentSnapshotV2,
 ): EnvironmentSnapshotV2 {
+  exactKeys(
+    snapshot,
+    ["environment_id", "plan_digest", "snapshot_digest", "artifact"],
+    "environment snapshot",
+  );
   assertBound(request, snapshot);
-  if (!/^[a-f0-9]{64}$/.test(snapshot.snapshot_digest)) {
+  if (!DIGEST.test(snapshot.snapshot_digest)) {
     throw new RequestError(
       502,
       "ENVIRONMENT_EVIDENCE_INVALID",
       "environment snapshot digest is invalid",
     );
   }
+  verifyArtifact(snapshot.artifact, "environment snapshot artifact");
   return snapshot;
 }
 
@@ -330,12 +483,29 @@ export function verifyEnvironmentTeardown(
   request: EnvironmentActionRequestV2,
   teardown: EnvironmentTeardownV2,
 ): EnvironmentTeardownV2 {
+  exactKeys(
+    teardown,
+    [
+      "environment_id",
+      "plan_digest",
+      "stopped",
+      "cleanup_complete",
+      "diagnostic_artifact",
+    ],
+    "environment teardown",
+  );
   assertBound(request, teardown);
   if (!teardown.stopped || !teardown.cleanup_complete) {
     throw new RequestError(
       422,
       "ENVIRONMENT_CLEANUP_INCOMPLETE",
       "environment cleanup did not complete",
+    );
+  }
+  if (teardown.diagnostic_artifact !== null) {
+    verifyArtifact(
+      teardown.diagnostic_artifact,
+      "teardown diagnostic artifact",
     );
   }
   return teardown;

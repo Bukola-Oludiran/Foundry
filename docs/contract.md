@@ -232,6 +232,15 @@ resource/integration bindings, logical secret handles, and the exact environment
 Successful and failed builds tear down an environment through the same durable effect boundary;
 host cancellation reconciliation remains pending.
 
+After a successful durable repository build, Foundry validates the recovered health, migration,
+snapshot, and teardown records as one lifecycle before materializing
+`.foundry/resources/evidence.json`. The records must share the exact environment and plan
+identities; health, required migrations, and cleanup must be green; artifact metadata and authored
+diagnostics are strictly bounded; and unknown fields or secret-shaped text fail closed. The file is
+created recovery-safely inside the isolated worktree, accepts an identical replay, and refuses to
+replace conflicting evidence. It contains no credentials, connection strings, endpoints, raw
+commands, or raw provider output.
+
 An IR v2 repository build also materializes `.foundry/resources/manifest.json` and
 `.foundry/resources/docker-compose.yml` in its isolated attempt worktree. The JSON manifest carries
 only deployment-neutral resource policy and logical secret-provider references. Compose publishes

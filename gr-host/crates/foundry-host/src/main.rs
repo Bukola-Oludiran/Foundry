@@ -18,6 +18,7 @@ mod architect;
 mod collaboration;
 mod dependency_files;
 mod durable;
+mod environment_evidence;
 mod http;
 mod repository;
 mod sidecar;
@@ -25,6 +26,7 @@ mod studio;
 mod studio_room;
 mod studio_service;
 use dependency_files::materialize_native_dependency_files;
+use environment_evidence::materialize_environment_evidence;
 use http::{http_get_bytes, http_post_json};
 use repository::{
     dependency_file_artifacts, git_revision, materialize_architecture_files,
@@ -1563,6 +1565,14 @@ fn main() {
                     )
                     .unwrap_or_else(|error| {
                         eprintln!("materialize native dependency files: {error}");
+                        std::process::exit(1);
+                    }),
+                );
+            }
+            if let Some(evidence) = durable_outcome.environment_evidence.as_ref() {
+                architecture_paths.extend(
+                    materialize_environment_evidence(worktree, evidence).unwrap_or_else(|error| {
+                        eprintln!("materialize environment lifecycle evidence: {error}");
                         std::process::exit(1);
                     }),
                 );

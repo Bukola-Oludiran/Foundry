@@ -11,6 +11,7 @@ import {
   HttpEnvironmentManager,
   verifyEnvironmentHandle,
   verifyEnvironmentHealth,
+  verifyEnvironmentSnapshot,
   verifyEnvironmentTeardown,
   verifyMigrationResult,
 } from "../src/environment-manager.ts";
@@ -185,6 +186,64 @@ accept("accepts complete repeatability evidence", () =>
       media_type: "application/json",
     },
   }),
+);
+reject(
+  "rejects secret-shaped health details",
+  "ENVIRONMENT_EVIDENCE_INVALID",
+  () =>
+    verifyEnvironmentHealth(action, {
+      environment_id: action.environment_id,
+      plan_digest: action.plan_digest,
+      healthy: true,
+      services: [
+        {
+          id: "primary-db",
+          healthy: true,
+          detail: "Authorization: Bearer hidden",
+        },
+      ],
+    }),
+);
+reject(
+  "rejects malformed migration artifacts",
+  "ENVIRONMENT_EVIDENCE_INVALID",
+  () =>
+    verifyMigrationResult(migrationRequest, {
+      environment_id: action.environment_id,
+      plan_digest: action.plan_digest,
+      green: true,
+      outcomes: [
+        {
+          resource_id: "primary-db",
+          owner_node: "api",
+          migration_digest: digest("f"),
+          applied: true,
+          repeatable_verified: true,
+          duration_ms: 12,
+          diagnostic: null,
+        },
+      ],
+      artifact: {
+        sha256: "not-a-digest",
+        size: 1,
+        media_type: "application/json",
+      },
+    }),
+);
+reject(
+  "rejects malformed snapshot artifacts",
+  "ENVIRONMENT_EVIDENCE_INVALID",
+  () =>
+    verifyEnvironmentSnapshot(action, {
+      environment_id: action.environment_id,
+      plan_digest: action.plan_digest,
+      snapshot_digest: digest("2"),
+      artifact: {
+        sha256: digest("3"),
+        size: -1,
+        media_type: "application/json",
+      },
+    }),
 );
 reject("rejects unpinned service images", "INVALID_REQUEST", () =>
   validateStartEnvironmentRequest({
