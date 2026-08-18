@@ -36,6 +36,11 @@ Status: in progress; the crash-recovery execution slice is implemented.
 - Implemented cancellation slice: an idempotent filesystem request is accepted while the daemon is
   live or stopped, GraphReact records cancellation before closing run admission, and the worker has
   an authenticated cooperative cancellation endpoint. Existing artifacts are retained.
+- Implemented cancellation-time environment reconciliation: `cancelling` is durably recorded
+  before action, pending worker effects receive idempotent cooperative cancellation, an ambiguously
+  dispatched environment start is resolved with its original effect ID, and terminal `cancelled`
+  is withheld until teardown completion and bounded evidence are committed. Cleanup resumes from a
+  crash-safe journal without changing the authoritative GraphReact run/artifact history.
 - Implemented crash acceptance: subprocess kills after activation, before/after effect dispatch,
   after result application, and after the terminal commit all recover the same one-node run green.
   This matrix runs in OCI isolation in CI.
@@ -237,8 +242,8 @@ Status: foundation and worker execution boundaries implemented; durable build or
   capability may call `POST /v2/studios/:run_id/commands`. Existing v1 commands remain on their
   original route and reject v2 proposals explicitly rather than discarding declarations.
 - Remaining: deployable resolver, runner, and controller images,
-  cancellation-time environment reconciliation, the concrete Docker controller/emulator service
-  itself, contract-test/resource-usage evidence linkage, and the broad
+  the concrete Docker controller/emulator service itself, contract-test/resource-usage evidence
+  linkage, and the broad
   polyglot restart acceptance fixture. Buzz now has
   typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
   expectation mutation forms plus dedicated managed-resource and third-party integration graph

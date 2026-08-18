@@ -230,7 +230,13 @@ resolution, environment start/health, migration, and snapshot operations as stab
 effects before admitting implementation nodes. Node requests receive only their package root,
 resource/integration bindings, logical secret handles, and the exact environment snapshot.
 Successful and failed builds tear down an environment through the same durable effect boundary;
-host cancellation reconciliation remains pending.
+host cancellation first commits the monotonic GraphReact cancellation request, cooperatively
+cancels pending worker effects, and then reconciles any private environment before committing the
+terminal `cancelled` status. If environment creation was dispatched but its result was not applied,
+Foundry resolves that ambiguity with the original idempotent effect ID and tears down the recovered
+environment. A crash-safe local reconciliation journal preserves the cleanup effect ID, while the
+authoritative completion and bounded cleanup evidence are committed to the GraphReact log and
+artifact store. Restart resumes `cancelling`; it never reports `cancelled` before cleanup completes.
 
 After a successful durable repository build, Foundry validates the recovered health, migration,
 snapshot, and teardown records as one lifecycle before materializing

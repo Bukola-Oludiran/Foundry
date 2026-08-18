@@ -15,6 +15,7 @@
 
 mod agent_runtime;
 mod architect;
+mod cancellation_reconciliation;
 mod collaboration;
 mod dependency_files;
 mod durable;

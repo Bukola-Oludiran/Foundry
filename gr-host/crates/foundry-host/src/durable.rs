@@ -24,6 +24,7 @@ use graphreact_persistence::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::cancellation_reconciliation::reconcile_cancelled_environment;
 use crate::http::http_post_json;
 use crate::{BuildPlan, Ir, Job, MAX_RETRIES};
 
@@ -202,6 +203,54 @@ fn cancellation_requested(durability_dir: &Path, run_id: &RunId) -> bool {
         .join("cancel-requests")
         .join(run_id.as_str())
         .is_file()
+}
+
+fn complete_cancellation(
+    scheduler: &Scheduler,
+    engine: &dyn PersistenceEngine,
+    durability_dir: &Path,
+    run_id: &RunId,
+    attempt_id: &AttemptId,
+    adapter: &WorkerEffectAdapter,
+) -> Result<(), String> {
+    block_on(cancel_run(scheduler, engine, FENCING_TOKEN, run_id))
+        .map_err(|error| error.to_string())?;
+    crash_injection("after_cancellation_commit");
+    let state = scheduler.snapshot_durable_state();
+    let values = state.nodes.get(V2_PREFLIGHT_NODE);
+    let cleanup_already_committed = values
+        .and_then(|values| values.get("environment_teardown"))
+        .is_some_and(|value| !value.is_null());
+    let environment_handle = (!cleanup_already_committed)
+        .then(|| values.and_then(|values| values.get("environment_handle")))
+        .flatten();
+    let cleanup = reconcile_cancelled_environment(
+        engine,
+        FENCING_TOKEN,
+        durability_dir,
+        run_id,
+        attempt_id,
+        environment_handle,
+        adapter,
+    )?;
+    crash_injection("before_cancelled_status");
+    block_on(engine.commit(
+        FENCING_TOKEN,
+        &[RuntimeRecordV1::RunStatusChanged {
+            run_id: run_id.clone(),
+            status: RunStatus::Cancelled,
+            result: Some(json!({
+                "environment_cleanup": cleanup,
+                "cleanup_already_committed": cleanup_already_committed,
+            })),
+            error: None,
+            changed_at_ms: unix_time_ms(),
+        }],
+    ))
+    .map_err(|error| error.to_string())?;
+    block_on(write_runtime_snapshot(scheduler, engine, FENCING_TOKEN))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn retry_or_fail(
@@ -987,7 +1036,7 @@ fn unix_time_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn crash_injection(point: &str) {
+pub(crate) fn crash_injection(point: &str) {
     if std::env::var("FOUNDRY_CRASH_AT").ok().as_deref() != Some(point) {
         return;
     }
@@ -1239,49 +1288,42 @@ pub fn run(
         preferred_run_id.as_ref(),
     ))?;
     println!("  durable run: {} ({:?})", run.run_id, run.status);
+    let worker_adapter = Arc::new(WorkerEffectAdapter {
+        base: base.to_owned(),
+        token: token.to_owned(),
+    });
     if run.status.is_terminal() {
         return match run.status {
             RunStatus::Succeeded => Ok(durable_build_outcome(&scheduler, v2.as_ref())),
             _ => Err(format!("durable run is already terminal: {:?}", run.status)),
         };
     }
+    if run.status == RunStatus::Cancelling {
+        complete_cancellation(
+            &scheduler,
+            engine.as_ref(),
+            &durability_dir,
+            &run.run_id,
+            &run.attempt_id,
+            worker_adapter.as_ref(),
+        )?;
+        return Err(format!("durable run {} was cancelled", run.run_id));
+    }
 
     let mut registry = EffectAdapterRegistry::default();
-    registry.register(
-        "foundry-worker",
-        Arc::new(WorkerEffectAdapter {
-            base: base.to_owned(),
-            token: token.to_owned(),
-        }),
-    );
+    registry.register("foundry-worker", worker_adapter.clone());
 
     loop {
         crash_injection("before_activation");
         if cancellation_requested(&durability_dir, &run.run_id) {
-            block_on(cancel_run(
+            complete_cancellation(
                 &scheduler,
                 engine.as_ref(),
-                FENCING_TOKEN,
+                &durability_dir,
                 &run.run_id,
-            ))
-            .map_err(|error| error.to_string())?;
-            block_on(engine.commit(
-                FENCING_TOKEN,
-                &[RuntimeRecordV1::RunStatusChanged {
-                    run_id: run.run_id.clone(),
-                    status: RunStatus::Cancelled,
-                    result: None,
-                    error: None,
-                    changed_at_ms: unix_time_ms(),
-                }],
-            ))
-            .map_err(|error| error.to_string())?;
-            block_on(write_runtime_snapshot(
-                &scheduler,
-                engine.as_ref(),
-                FENCING_TOKEN,
-            ))
-            .map_err(|error| error.to_string())?;
+                &run.attempt_id,
+                worker_adapter.as_ref(),
+            )?;
             return Err(format!("durable run {} was cancelled", run.run_id));
         }
         scheduler
