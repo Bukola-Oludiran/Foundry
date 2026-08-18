@@ -25,8 +25,9 @@ mod studio_room;
 mod studio_service;
 use http::http_post_json;
 use repository::{
-    git_revision, materialize_architecture_files, materialize_generated_resources, DiffPolicy,
-    GitHubRepositoryProvider, LocalGitRepository, PullRequestPublisher, RepositoryProvider,
+    git_revision, materialize_architecture_files, materialize_dependency_resolution,
+    materialize_generated_resources, DiffPolicy, GitHubRepositoryProvider, LocalGitRepository,
+    PullRequestPublisher, RepositoryProvider,
 };
 
 use foundry_ir::types::{Ir, Kind, Node};
@@ -1474,7 +1475,7 @@ fn main() {
                     .join("durability")
                     .join(&ir_digest)
             });
-        durable::run(
+        let durable_outcome = durable::run(
             &ir,
             &plan,
             jobs.as_ref(),
@@ -1492,6 +1493,16 @@ fn main() {
             std::process::exit(1);
         });
         if let Some(worktree) = &run_worktree {
+            if let Some(resolution) = durable_outcome.dependency_resolution.as_ref() {
+                architecture_paths.extend(
+                    materialize_dependency_resolution(worktree, resolution).unwrap_or_else(
+                        |error| {
+                            eprintln!("materialize dependency resolution evidence: {error}");
+                            std::process::exit(1);
+                        },
+                    ),
+                );
+            }
             let policy = DiffPolicy {
                 allowed_paths: targets
                     .keys()

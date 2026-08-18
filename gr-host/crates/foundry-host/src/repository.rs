@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone)]
 pub struct RunWorktree {
     pub path: PathBuf,
@@ -129,6 +131,90 @@ pub fn materialize_generated_resources(
         ".foundry/resources/manifest.json".into(),
         ".foundry/resources/docker-compose.yml".into(),
     ])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentArtifactRef {
+    sha256: String,
+    size: u64,
+    media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyResolutionResult {
+    ok: bool,
+    evidence: Option<foundry_ir::DependencyResolutionEvidenceV1>,
+    manifest: Option<ContentArtifactRef>,
+    lockfile: Option<ContentArtifactRef>,
+    dependency_layer: Option<ContentArtifactRef>,
+    sbom: Option<ContentArtifactRef>,
+    license_report: Option<ContentArtifactRef>,
+    vulnerability_report: Option<ContentArtifactRef>,
+    error: Option<String>,
+    failure_code: Option<String>,
+}
+
+/// Materializes only the strict, bounded resolver result. Package contents stay
+/// in the content-addressed artifact store and no registry credentials enter Git.
+pub fn materialize_dependency_resolution(
+    worktree: &RunWorktree,
+    result: &serde_json::Value,
+) -> Result<Vec<String>, String> {
+    let result: DependencyResolutionResult =
+        serde_json::from_value(result.clone()).map_err(|error| error.to_string())?;
+    if !result.ok
+        || result.evidence.is_none()
+        || result.manifest.is_none()
+        || result.lockfile.is_none()
+        || result.dependency_layer.is_none()
+        || result.sbom.is_none()
+        || result.license_report.is_none()
+        || result.vulnerability_report.is_none()
+        || result.error.is_some()
+        || result.failure_code.is_some()
+    {
+        return Err("dependency resolution result is not complete and green".into());
+    }
+    let foundry_dir = worktree.path.join(".foundry");
+    let dependencies_dir = foundry_dir.join("dependencies");
+    for candidate in [&foundry_dir, &dependencies_dir] {
+        if candidate
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(format!(
+                "refusing dependency materialization through symlink `{}`",
+                candidate.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(&dependencies_dir).map_err(|error| error.to_string())?;
+    let root = worktree
+        .path
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let target = dependencies_dir
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !target.starts_with(&root) {
+        return Err("dependency materialization escaped the isolated worktree".into());
+    }
+    let path = dependencies_dir.join("resolution.json");
+    let bytes = serde_json::to_vec_pretty(&result).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| error.to_string())?;
+    use std::io::Write;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+    Ok(vec![".foundry/dependencies/resolution.json".into()])
 }
 
 pub trait RepositoryProvider {
@@ -441,6 +527,91 @@ impl PullRequestPublisher for GitHubRepositoryProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dependency_resolution_result() -> serde_json::Value {
+        let digest = |byte: char| byte.to_string().repeat(64);
+        let artifact = |byte: char, media_type: &str| {
+            serde_json::json!({
+                "sha256": digest(byte),
+                "size": 128,
+                "media_type": media_type,
+            })
+        };
+        serde_json::json!({
+            "ok": true,
+            "evidence": {
+                "resolution_version": 1,
+                "plan_digest": digest('0'),
+                "resolver_image": "resolver@sha256:fixture",
+                "platform": "linux/amd64",
+                "manifest_sha256": digest('1'),
+                "lockfile_sha256": digest('2'),
+                "dependency_layer_sha256": digest('3'),
+                "sbom_sha256": digest('4'),
+                "packages": [{
+                    "package_id": "web-framework",
+                    "name": "web-framework",
+                    "version": "1.0.0",
+                    "integrity": "sha512-fixture-value",
+                    "licenses": ["MIT"]
+                }],
+                "vulnerabilities": []
+            },
+            "manifest": artifact('1', "application/json"),
+            "lockfile": artifact('2', "application/json"),
+            "dependency_layer": artifact('3', "application/vnd.oci.image.layer.v1.tar+gzip"),
+            "sbom": artifact('4', "application/vnd.cyclonedx+json"),
+            "license_report": artifact('5', "application/json"),
+            "vulnerability_report": artifact('6', "application/json"),
+            "error": null,
+            "failure_code": null
+        })
+    }
+
+    #[test]
+    fn dependency_evidence_materializes_only_bounded_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "foundry-dependency-materialization-{}",
+            std::process::id()
+        ));
+        let attempt = root.join("attempt");
+        std::fs::create_dir_all(&attempt).unwrap();
+        let worktree = RunWorktree {
+            path: attempt.clone(),
+            branch: "foundry/test".into(),
+            base_commit: "base".into(),
+        };
+        let paths =
+            materialize_dependency_resolution(&worktree, &dependency_resolution_result()).unwrap();
+        assert_eq!(paths, vec![".foundry/dependencies/resolution.json"]);
+        let persisted =
+            std::fs::read_to_string(attempt.join(".foundry/dependencies/resolution.json")).unwrap();
+        assert!(persisted.contains("application/vnd.cyclonedx+json"));
+        assert!(!persisted.contains("password"));
+        assert!(!root.join(".foundry").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_evidence_fails_closed_when_incomplete_or_extended() {
+        let root = std::env::temp_dir().join(format!(
+            "foundry-dependency-rejection-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let worktree = RunWorktree {
+            path: root.clone(),
+            branch: "foundry/test".into(),
+            base_commit: "base".into(),
+        };
+        let mut incomplete = dependency_resolution_result();
+        incomplete["sbom"] = serde_json::Value::Null;
+        assert!(materialize_dependency_resolution(&worktree, &incomplete).is_err());
+        let mut extended = dependency_resolution_result();
+        extended["registry_token"] = serde_json::json!("forbidden");
+        assert!(materialize_dependency_resolution(&worktree, &extended).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn v2_resources_materialize_only_inside_the_attempt() {

@@ -39,6 +39,22 @@ pub struct V2ExecutionPlan {
     pub node_bindings: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DurableBuildOutcome {
+    pub dependency_resolution: Option<Value>,
+}
+
+fn durable_build_outcome(scheduler: &Scheduler) -> DurableBuildOutcome {
+    let state = scheduler.snapshot_durable_state();
+    let values = state.nodes.get(V2_PREFLIGHT_NODE);
+    DurableBuildOutcome {
+        dependency_resolution: values
+            .and_then(|values| values.get("dependency_result"))
+            .filter(|value| !value.is_null())
+            .cloned(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagerDecision {
     Retry,
@@ -1066,7 +1082,7 @@ pub fn run(
     targets: &BTreeMap<String, ()>,
     preferred_run_id: Option<&str>,
     v2: Option<V2ExecutionPlan>,
-) -> Result<(), String> {
+) -> Result<DurableBuildOutcome, String> {
     debug_assert_eq!(MANAGER_DECISIONS.len(), 4);
     let mut definitions: HashMap<String, NodeDefinition> = jobs
         .iter()
@@ -1181,7 +1197,7 @@ pub fn run(
     println!("  durable run: {} ({:?})", run.run_id, run.status);
     if run.status.is_terminal() {
         return match run.status {
-            RunStatus::Succeeded => Ok(()),
+            RunStatus::Succeeded => Ok(durable_build_outcome(&scheduler)),
             _ => Err(format!("durable run is already terminal: {:?}", run.status)),
         };
     }
@@ -1326,7 +1342,7 @@ pub fn run(
             ))
             .map_err(|error| error.to_string())?;
             println!("✅ durable build: ALL GREEN");
-            return Ok(());
+            return Ok(durable_build_outcome(&scheduler));
         }
         if let Some((node, _)) = phases
             .iter()

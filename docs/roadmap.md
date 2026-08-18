@@ -212,6 +212,10 @@ Status: foundation and worker execution boundaries implemented; durable build or
   `.foundry/resources/manifest.json` preserves the deployment-neutral plan and logical secret
   bindings, while `docker-compose.yml` uses digest-image environment references, an internal-only
   network, read-only services, dropped capabilities, and no published host ports or credentials.
+- Implemented recovered dependency-evidence materialization in the isolated run worktree. A green
+  durable build writes `.foundry/dependencies/resolution.json` containing only the strict verified
+  resolution result and content-addressed artifact metadata; incomplete results, unknown fields,
+  and resolver errors fail closed before Git validation.
 - Implemented the IR v2 Studio semantic-edit boundary: complete typed package, resource,
   integration, secret-reference, binding, migration, and test-environment declaration batches are
   compiler-checked atomically, respect node boundary locks, change the semantic digest, and produce
@@ -224,7 +228,8 @@ Status: foundation and worker execution boundaries implemented; durable build or
   original route and reject v2 proposals explicitly rather than discarding declarations.
 - Remaining: deployable runner/controller images that retrieve and mount dependency artifacts,
   cancellation-time environment reconciliation, the concrete Docker controller/emulator service
-  itself, complete supply-chain/effect evidence materialization in the worktree, the remaining
-  package-root/declaration/fixture mutation forms and the broad polyglot restart acceptance
-  fixture. Buzz now has dedicated managed-resource and third-party integration graph projections
-  with typed binding edges; IR v1 never projects ordinary dependencies into those views.
+  itself, native manifest/lockfile retrieval and complete environment/effect evidence
+  materialization in the worktree, and the broad polyglot restart acceptance fixture. Buzz now has
+  typed package-root, declaration, binding, secret-reference, fixture, seed, and contract-
+  expectation mutation forms plus dedicated managed-resource and third-party integration graph
+  projections. IR v1 never projects ordinary dependencies into those views.
