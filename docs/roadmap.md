@@ -225,5 +225,6 @@ Status: foundation and worker execution boundaries implemented; durable build or
 - Remaining: deployable runner/controller images that retrieve and mount dependency artifacts,
   cancellation-time environment reconciliation, the concrete Docker controller/emulator service
   itself, complete supply-chain/effect evidence materialization in the worktree, the remaining
-  package-root/declaration/fixture mutation forms and external graph projections, and the broad
-  polyglot restart acceptance fixture.
+  package-root/declaration/fixture mutation forms and the broad polyglot restart acceptance
+  fixture. Buzz now has dedicated managed-resource and third-party integration graph projections
+  with typed binding edges; IR v1 never projects ordinary dependencies into those views.
