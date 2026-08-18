@@ -10,6 +10,9 @@ use std::io::Write;
 use std::path::Path;
 
 use foundry_ir::{
+    apply_external_studio_command_v2, StudioExternalCommandOutcomeV2, StudioExternalCommandV2,
+};
+use foundry_ir::{
     apply_generated_studio_candidate, apply_studio_command, studio_semantic_digest,
     ArchitectureBuildHandoffV1, ArchitectureLayoutV1, ArchitectureProposalV1,
     ArchitectureRevisionV1, BoundaryLockV1, CriticReviewV1, CriticVerdictV1,
@@ -17,6 +20,7 @@ use foundry_ir::{
     StudioCommandErrorV1, StudioCommandOutcomeV1, StudioCommandV1, StudioRationaleV1,
     StudioRevisionPhaseV1,
 };
+use foundry_ir::{compile_v2, ir_v2_digest, studio_v2_semantic_digest, IrDocument};
 use futures::executor::block_on;
 use graphreact_durable_runtime::store_artifact;
 use graphreact_persistence::{
@@ -111,11 +115,33 @@ pub struct StudioSnapshotV1 {
     pub state: StudioStateV1,
     pub proposal: ArchitectureProposalV1,
     pub revision: ArchitectureRevisionV1,
-    pub ir: Ir,
+    pub ir: IrDocument,
     pub rationale: StudioRationaleV1,
     pub locks: Vec<BoundaryLockV1>,
     pub layout: ArchitectureLayoutV1,
     pub structural_diff: serde_json::Value,
+}
+
+impl StudioSnapshotV1 {
+    pub fn v1_ir(&self) -> Result<&Ir, StudioError> {
+        match &self.ir {
+            IrDocument::V1(ir) => Ok(ir),
+            IrDocument::V2(_) => Err(error(
+                "INVALID_COMMAND",
+                "this Studio operation supports IR v1 only; use the IR v2 semantic command boundary",
+            )),
+        }
+    }
+
+    pub fn v2_ir(&self) -> Result<&foundry_ir::IrV2, StudioError> {
+        match &self.ir {
+            IrDocument::V2(ir) => Ok(ir),
+            IrDocument::V1(_) => Err(error(
+                "INVALID_COMMAND",
+                "IR v2 semantic commands require an IR v2 proposal",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -149,6 +175,36 @@ fn now_ms() -> u64 {
 fn digest<T: Serialize>(value: &T) -> String {
     let value = serde_json::to_value(value).expect("Studio contracts serialize");
     format!("{:x}", Sha256::digest(canonical_json_bytes(&value)))
+}
+
+fn compile_document(ir: &IrDocument) -> Result<(), StudioError> {
+    let diagnostics = match ir {
+        IrDocument::V1(ir) => foundry_ir::compile(ir)
+            .map(|_| ())
+            .map_err(|items| items.into_iter().map(|item| item.to_string()).collect()),
+        IrDocument::V2(ir) => compile_v2(ir)
+            .map(|_| ())
+            .map_err(|items| items.into_iter().map(|item| item.to_string()).collect()),
+    };
+    diagnostics.map_err(|items: Vec<String>| error("COMPILER_REJECTED", items.join("\n")))
+}
+
+fn document_digest(ir: &IrDocument) -> String {
+    match ir {
+        IrDocument::V1(ir) => foundry_ir::ir_digest(ir),
+        IrDocument::V2(ir) => ir_v2_digest(ir),
+    }
+}
+
+fn document_semantic_digest(
+    ir: &IrDocument,
+    rationale: &StudioRationaleV1,
+    locks: &[BoundaryLockV1],
+) -> String {
+    match ir {
+        IrDocument::V1(ir) => studio_semantic_digest(ir, rationale, locks),
+        IrDocument::V2(ir) => studio_v2_semantic_digest(ir, rationale, locks),
+    }
 }
 
 fn deployment_id(root: &Path) -> Result<DeploymentId, StudioError> {
@@ -492,7 +548,7 @@ fn revision_artifacts(
     engine: &dyn PersistenceEngine,
     run_id: &RunId,
     revision: ArchitectureRevisionV1,
-    ir: &Ir,
+    ir: &IrDocument,
     rationale: &StudioRationaleV1,
     locks: &[BoundaryLockV1],
     layout: &ArchitectureLayoutV1,
@@ -568,17 +624,28 @@ pub fn create(
     title: &str,
     idempotency_key: &str,
 ) -> Result<StudioStateV1, StudioError> {
+    create_document(
+        durability_dir,
+        binding,
+        IrDocument::V1(ir),
+        rationale,
+        creator_pubkey,
+        title,
+        idempotency_key,
+    )
+}
+
+pub fn create_document(
+    durability_dir: &Path,
+    binding: StudioBindingV1,
+    ir: IrDocument,
+    rationale: StudioRationaleV1,
+    creator_pubkey: &str,
+    title: &str,
+    idempotency_key: &str,
+) -> Result<StudioStateV1, StudioError> {
     validate_binding(&binding)?;
-    foundry_ir::compile(&ir).map_err(|diagnostics| {
-        error(
-            "COMPILER_REJECTED",
-            diagnostics
-                .into_iter()
-                .map(|item| item.to_string())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-    })?;
+    compile_document(&ir)?;
     if creator_pubkey.trim().is_empty()
         || title.trim().is_empty()
         || idempotency_key.trim().is_empty()
@@ -642,7 +709,7 @@ pub fn create(
     let proposal_id = RunId::new().to_string();
     let revision_id = RunId::new().to_string();
     let locks = Vec::new();
-    let semantic_digest = studio_semantic_digest(&ir, &rationale, &locks);
+    let semantic_digest = document_semantic_digest(&ir, &rationale, &locks);
     let created_at_ms = now_ms();
     let revision = ArchitectureRevisionV1 {
         studio_version: 1,
@@ -650,7 +717,7 @@ pub fn create(
         parent_revision_id: None,
         proposal_id: proposal_id.clone(),
         author_pubkey: creator_pubkey.into(),
-        ir_digest: foundry_ir::ir_digest(&ir),
+        ir_digest: document_digest(&ir),
         rationale_digest: digest(&rationale),
         locks_digest: digest(&locks),
         semantic_digest: semantic_digest.clone(),
@@ -879,8 +946,14 @@ pub fn apply_command(
         semantic_digest,
         changed_nodes,
         rebuild_nodes,
-    } = apply_studio_command(&current.ir, &current.rationale, &current.locks, command)
-        .map_err(command_error)?;
+    } = apply_studio_command(
+        current.v1_ir()?,
+        &current.rationale,
+        &current.locks,
+        command,
+    )
+    .map_err(command_error)?;
+    let ir_document = IrDocument::V1(ir.clone());
     let revision_id = RunId::new().to_string();
     let revision = ArchitectureRevisionV1 {
         studio_version: 1,
@@ -899,7 +972,7 @@ pub fn apply_command(
         &engine,
         &run_id,
         revision,
-        &ir,
+        &ir_document,
         &rationale,
         &locks,
         &current.layout,
@@ -915,6 +988,104 @@ pub fn apply_command(
         &run_id,
         format!("architecture-command-{}.json", command.command_id),
         "application/vnd.foundry.architecture-command+json",
+        command,
+    )?;
+    state.operation_receipts.insert(
+        operation_key.into(),
+        StudioOperationReceiptV1 {
+            operation_key: operation_key.into(),
+            request_hash,
+            revision_id,
+        },
+    );
+    commit_state(&engine, &run_id, &state)?;
+    snapshot_from_state(&engine, state, &command.proposal_id)
+}
+
+pub fn apply_external_command_v2(
+    durability_dir: &Path,
+    run_id: &str,
+    command: &StudioExternalCommandV2,
+    operation_key: &str,
+) -> Result<StudioSnapshotV1, StudioError> {
+    let run_id = RunId::parse(run_id.to_owned()).map_err(|e| error("NOT_FOUND", e.to_string()))?;
+    let engine = engine(durability_dir)?;
+    let mut state = load_state(&engine, &run_id)?;
+    let request_hash = digest(&(command, operation_key));
+    if let Some(receipt) = state.operation_receipts.get(operation_key) {
+        if receipt.request_hash != request_hash {
+            return Err(error(
+                "IDEMPOTENCY_CONFLICT",
+                "operation key was reused with different command content",
+            ));
+        }
+        return snapshot_from_state(&engine, state, &command.proposal_id);
+    }
+    let proposal_index = state
+        .proposals
+        .iter()
+        .position(|proposal| proposal.proposal_id == command.proposal_id)
+        .ok_or_else(|| error("NOT_FOUND", "proposal was not found"))?;
+    let proposal = &state.proposals[proposal_index];
+    if proposal.status != ProposalStatusV1::Open {
+        return Err(error("INVALID_COMMAND", "proposal is not open"));
+    }
+    if proposal.head_semantic_digest != command.expected_head_digest {
+        return Err(error(
+            "REVISION_CONFLICT",
+            format!(
+                "expected `{}`, current `{}`",
+                command.expected_head_digest, proposal.head_semantic_digest
+            ),
+        ));
+    }
+    let current = snapshot_from_state(&engine, state.clone(), &command.proposal_id)?;
+    let StudioExternalCommandOutcomeV2 {
+        ir,
+        semantic_digest,
+        changed_nodes,
+        rebuild_nodes,
+    } = apply_external_studio_command_v2(
+        current.v2_ir()?,
+        &current.rationale,
+        &current.locks,
+        command,
+    )
+    .map_err(command_error)?;
+    let revision_id = RunId::new().to_string();
+    let revision = ArchitectureRevisionV1 {
+        studio_version: 1,
+        revision_id: revision_id.clone(),
+        parent_revision_id: Some(current.revision.revision_id),
+        proposal_id: command.proposal_id.clone(),
+        author_pubkey: command.actor_pubkey.clone(),
+        ir_digest: ir_v2_digest(&ir),
+        rationale_digest: digest(&current.rationale),
+        locks_digest: digest(&current.locks),
+        semantic_digest: semantic_digest.clone(),
+        phase: StudioRevisionPhaseV1::AwaitingCritic,
+        created_at_ms: now_ms(),
+    };
+    let document = IrDocument::V2(ir);
+    state.revisions.push(revision_artifacts(
+        &engine,
+        &run_id,
+        revision,
+        &document,
+        &current.rationale,
+        &current.locks,
+        &current.layout,
+        &changed_nodes,
+        &rebuild_nodes,
+    )?);
+    state.proposals[proposal_index].head_revision_id = revision_id.clone();
+    state.proposals[proposal_index].head_semantic_digest = semantic_digest;
+    state.proposals[proposal_index].updated_at_ms = now_ms();
+    store_json(
+        &engine,
+        &run_id,
+        format!("architecture-external-command-{}.json", command.command_id),
+        "application/vnd.foundry.architecture-external-command-v2+json",
         command,
     )?;
     state.operation_receipts.insert(
@@ -977,13 +1148,14 @@ pub fn apply_generated_candidate(
         changed_nodes,
         rebuild_nodes,
     } = apply_generated_studio_candidate(
-        &current.ir,
+        current.v1_ir()?,
         &current.rationale,
         &current.locks,
         candidate,
         rationale,
     )
     .map_err(command_error)?;
+    let ir_document = IrDocument::V1(ir.clone());
     let revision_id = RunId::new().to_string();
     let revision = ArchitectureRevisionV1 {
         studio_version: 1,
@@ -1002,7 +1174,7 @@ pub fn apply_generated_candidate(
         &engine,
         &run_id,
         revision,
-        &ir,
+        &ir_document,
         &rationale,
         &locks,
         &current.layout,
@@ -1573,7 +1745,7 @@ mod tests {
         ArchitectureOperationKindV1, ArchitectureRoomActorKindV1, ArchitectureRoomLedger,
         ArchitectureRoomPayloadV1,
     };
-    use foundry_ir::StudioOperationV1;
+    use foundry_ir::{StudioExternalOperationV2, StudioOperationV1};
 
     fn fixture() -> (std::path::PathBuf, Ir) {
         let root = std::env::temp_dir().join(format!("foundry-studio-{}", RunId::new()));
@@ -1581,6 +1753,19 @@ mod tests {
             &std::fs::read(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../../ir/examples/string-utils.ir.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        (root, ir)
+    }
+
+    fn fixture_v2() -> (std::path::PathBuf, foundry_ir::IrV2) {
+        let root = std::env::temp_dir().join(format!("foundry-studio-v2-{}", RunId::new()));
+        let ir = serde_json::from_slice(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../ir/examples/service-stack.ir-v2.json"),
             )
             .unwrap(),
         )
@@ -1596,6 +1781,67 @@ mod tests {
             base_commit: "b".repeat(40),
             target_branch: "main".into(),
         }
+    }
+
+    #[test]
+    fn v2_document_survives_artifact_commit_and_reopen_exactly() {
+        let (root, ir) = fixture_v2();
+        let state = create_document(
+            &root,
+            binding(),
+            IrDocument::V2(ir.clone()),
+            StudioRationaleV1::default(),
+            "architect",
+            "External contracts",
+            "create-v2",
+        )
+        .unwrap();
+        let snapshot = snapshot(&root, &state.run_id, &state.proposals[0].proposal_id).unwrap();
+        assert_eq!(snapshot.ir, IrDocument::V2(ir.clone()));
+        assert_eq!(snapshot.revision.ir_digest, ir_v2_digest(&ir));
+        assert_eq!(
+            snapshot.revision.semantic_digest,
+            studio_v2_semantic_digest(&ir, &StudioRationaleV1::default(), &[])
+        );
+    }
+
+    #[test]
+    fn v2_command_advances_exact_head_and_replays_idempotently() {
+        let (root, ir) = fixture_v2();
+        let state = create_document(
+            &root,
+            binding(),
+            IrDocument::V2(ir.clone()),
+            StudioRationaleV1::default(),
+            "architect",
+            "External contracts",
+            "create-v2-command",
+        )
+        .unwrap();
+        let proposal = state.proposals[0].clone();
+        let mut bindings = ir.integration_bindings.clone();
+        bindings[0].timeout_ms += 1;
+        let command = StudioExternalCommandV2 {
+            command_version: 2,
+            command_id: "external-command".into(),
+            proposal_id: proposal.proposal_id.clone(),
+            expected_head_digest: proposal.head_semantic_digest.clone(),
+            actor_pubkey: "human".into(),
+            operations: vec![StudioExternalOperationV2::SetIntegrationBindings {
+                integration_bindings: bindings.clone(),
+            }],
+        };
+        let first = apply_external_command_v2(&root, &state.run_id, &command, "external-operation")
+            .unwrap();
+        let replay =
+            apply_external_command_v2(&root, &state.run_id, &command, "external-operation")
+                .unwrap();
+        assert_eq!(first.revision.revision_id, replay.revision.revision_id);
+        assert_ne!(
+            first.revision.semantic_digest,
+            proposal.head_semantic_digest
+        );
+        assert_eq!(first.v2_ir().unwrap().integration_bindings, bindings);
     }
 
     #[test]

@@ -217,8 +217,13 @@ Status: foundation and worker execution boundaries implemented; durable build or
   compiler-checked atomically, respect node boundary locks, change the semantic digest, and produce
   a deterministic rebuild closure. Buzz has matching version-discriminated models, node badges,
   and read projections for these contracts without reinterpreting IR v1.
+- Implemented durable Studio persistence and authenticated HTTP wiring for IR v2. Revision
+  artifacts retain the exact explicit document version, proposal CAS and idempotency receipts cover
+  external-contract edits, compiler rejection leaves the head unchanged, and only a human edit
+  capability may call `POST /v2/studios/:run_id/commands`. Existing v1 commands remain on their
+  original route and reject v2 proposals explicitly rather than discarding declarations.
 - Remaining: deployable runner/controller images that retrieve and mount dependency artifacts,
   cancellation-time environment reconciliation, the concrete Docker controller/emulator service
-  itself, complete supply-chain/effect evidence materialization in the worktree, Studio persistence
-  and HTTP wiring for IR v2 commands, typed Buzz mutation forms and external graph projections, and
-  the broad polyglot restart acceptance fixture.
+  itself, complete supply-chain/effect evidence materialization in the worktree, the remaining
+  package-root/declaration/fixture mutation forms and external graph projections, and the broad
+  polyglot restart acceptance fixture.

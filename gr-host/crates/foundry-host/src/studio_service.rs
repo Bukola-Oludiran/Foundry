@@ -22,8 +22,9 @@ use axum::{Json, Router};
 use base64::Engine;
 use foundry_ir::{
     ArchitectureLayoutV1, ArchitectureRequest, CriticVerdictV1, EvidenceCompletenessV1, Ir,
-    NodeImplementationEvidenceV1, ProposalStatusV1, RationaleEntryV1, StudioBindingV1,
-    StudioCommandV1, StudioOperationV1, StudioRationaleV1,
+    IrDocument, NodeImplementationEvidenceV1, ProposalStatusV1, RationaleEntryV1, StudioBindingV1,
+    StudioCommandV1, StudioExternalCommandV2, StudioExternalOperationV2, StudioOperationV1,
+    StudioRationaleV1,
 };
 use graphreact_persistence::RunId;
 use nostr::hashes::{sha256, Hash};
@@ -220,7 +221,7 @@ struct SessionResponse {
 #[serde(deny_unknown_fields)]
 struct CreateStudioRequest {
     binding: StudioBindingV1,
-    ir: Ir,
+    ir: IrDocument,
     #[serde(default)]
     rationale: StudioRationaleV1,
     title: String,
@@ -245,6 +246,16 @@ struct ApplyCommandRequest {
     proposal_id: String,
     expected_head_digest: String,
     operations: Vec<StudioOperationV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyExternalCommandRequestV2 {
+    command_version: u32,
+    command_id: String,
+    proposal_id: String,
+    expected_head_digest: String,
+    operations: Vec<StudioExternalOperationV2>,
 }
 
 #[derive(Deserialize)]
@@ -1873,7 +1884,7 @@ async fn create_studio(
     capability.approval_threshold = signed_policy
         .approval_threshold
         .max(state.policy.approval_threshold);
-    let created = studio::create(
+    let created = studio::create_document(
         &state.durability_dir,
         request.binding,
         request.ir,
@@ -2229,15 +2240,15 @@ async fn run_architect_studio(
                 &state.service_pubkey,
             )?;
         }
-        let mut languages = reviewed
-            .ir
+        let reviewed_ir = reviewed.v1_ir()?.clone();
+        let mut languages = reviewed_ir
             .nodes
             .iter()
             .filter_map(|node| {
                 node.implementation
                     .language
                     .clone()
-                    .or_else(|| reviewed.ir.spec.language.clone())
+                    .or_else(|| reviewed_ir.spec.language.clone())
             })
             .collect::<Vec<_>>();
         languages.sort();
@@ -2271,7 +2282,7 @@ async fn run_architect_studio(
             base_revision: base_commit.clone(),
             allowed_languages: languages,
             policy_constraints: repair_constraints,
-            existing_ir: Some(reviewed.ir.clone()),
+            existing_ir: Some(reviewed_ir),
         };
         let repair_output = state.durability_dir.join("agent-candidates").join(format!(
             "initial-{operation_file_key}-repair-{review_round}.ir.json"
@@ -2772,7 +2783,7 @@ fn spawn_rebase_operation(
             let command = GenerativeRequest {
                 expected_head_digest: rebased.revision.semantic_digest.clone(),
                 kind: GenerativeCommandKind::RewriteSubtree,
-                selected_nodes: vec![rebased.ir.root.clone()],
+                selected_nodes: vec![rebased.v1_ir()?.root.clone()],
                 instruction: format!(
                     "{}. Reapply the intent of this stale proposal while preserving the current external contracts and boundary locks. Stale proposal IR: {target_ir}",
                     request.instruction
@@ -3373,6 +3384,44 @@ async fn apply_command(
     Ok(Json(projection(&state, &capability, next)))
 }
 
+async fn apply_external_command_v2(
+    State(state): State<Arc<ServiceState>>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyExternalCommandRequestV2>,
+) -> Result<Json<StudioProjection>, ApiError> {
+    let current = studio::snapshot(&state.durability_dir, &run_id, &request.proposal_id)?;
+    let capability = capability(
+        &state,
+        &headers,
+        &current.state.binding.repository_coordinate,
+        "edit",
+    )?;
+    if !capability.human {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "agent authority cannot mutate external architecture contracts",
+        ));
+    }
+    let command = StudioExternalCommandV2 {
+        command_version: request.command_version,
+        command_id: request.command_id,
+        proposal_id: request.proposal_id,
+        expected_head_digest: request.expected_head_digest,
+        actor_pubkey: capability.actor_pubkey.clone(),
+        operations: request.operations,
+    };
+    let next = studio::apply_external_command_v2(
+        &state.durability_dir,
+        &run_id,
+        &command,
+        operation_key(&headers)?,
+    )
+    .map_err(|error| enrich_revision_conflict(error, &current))?;
+    Ok(Json(projection(&state, &capability, next)))
+}
+
 async fn create_proposal(
     State(state): State<Arc<ServiceState>>,
     Path(run_id): Path<String>,
@@ -3498,9 +3547,9 @@ async fn run_generate_revision(
             "generative command targets a stale proposal head",
         ));
     }
+    let current_ir = current.v1_ir()?.clone();
     if request.selected_nodes.iter().any(|node| {
-        !current
-            .ir
+        !current_ir
             .nodes
             .iter()
             .any(|candidate| candidate.id == *node)
@@ -3525,15 +3574,14 @@ async fn run_generate_revision(
             )
         })?;
     }
-    let mut languages = current
-        .ir
+    let mut languages = current_ir
         .nodes
         .iter()
         .filter_map(|node| {
             node.implementation
                 .language
                 .clone()
-                .or_else(|| current.ir.spec.language.clone())
+                .or_else(|| current_ir.spec.language.clone())
         })
         .collect::<Vec<_>>();
     languages.sort();
@@ -3553,7 +3601,7 @@ async fn run_generate_revision(
             "Preserve every Architecture Studio boundary lock".into(),
             "Return the complete strict Foundry IR v1 document".into(),
         ],
-        existing_ir: Some(current.ir.clone()),
+        existing_ir: Some(current_ir),
     };
     let architect_runtime = Arc::clone(&state.architect_runtime);
     let architect_run_id = format!("{run_id}:generative:{operation}");
@@ -3683,15 +3731,15 @@ async fn run_generate_revision(
                 &state.service_pubkey,
             )?;
         }
-        let mut languages = reviewed
-            .ir
+        let reviewed_ir = reviewed.v1_ir()?.clone();
+        let mut languages = reviewed_ir
             .nodes
             .iter()
             .filter_map(|node| {
                 node.implementation
                     .language
                     .clone()
-                    .or_else(|| reviewed.ir.spec.language.clone())
+                    .or_else(|| reviewed_ir.spec.language.clone())
             })
             .collect::<Vec<_>>();
         languages.sort();
@@ -3727,7 +3775,7 @@ async fn run_generate_revision(
             base_revision: reviewed.state.binding.base_commit.clone(),
             allowed_languages: languages,
             policy_constraints,
-            existing_ir: Some(reviewed.ir.clone()),
+            existing_ir: Some(reviewed_ir),
         };
         let repair_output = state
             .durability_dir
@@ -4564,6 +4612,10 @@ pub fn serve(args: &[String]) -> Result<(), String> {
             get(get_snapshot),
         )
         .route("/v1/studios/{run_id}/commands", post(apply_command))
+        .route(
+            "/v2/studios/{run_id}/commands",
+            post(apply_external_command_v2),
+        )
         .route("/v1/studios/{run_id}/proposals", post(create_proposal))
         .route(
             "/v1/studios/{run_id}/proposals/{proposal_id}/reject",
@@ -4705,6 +4757,30 @@ pub fn serve(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_command_request_is_strict_and_versioned() {
+        let request = serde_json::json!({
+            "command_version": 2,
+            "command_id": "command-1",
+            "proposal_id": "proposal-1",
+            "expected_head_digest": "digest",
+            "operations": [{
+                "operation": "set_secret_refs",
+                "secret_refs": [{
+                    "id": "billing-key",
+                    "provider": "operator",
+                    "name": "billing/key"
+                }]
+            }]
+        });
+        let parsed: ApplyExternalCommandRequestV2 =
+            serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(parsed.command_version, 2);
+        let mut unknown = request;
+        unknown["credential"] = serde_json::json!("forbidden");
+        assert!(serde_json::from_value::<ApplyExternalCommandRequestV2>(unknown).is_err());
+    }
 
     fn state() -> ServiceState {
         let keys = Keys::generate();

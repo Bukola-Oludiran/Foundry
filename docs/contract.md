@@ -231,6 +231,13 @@ no host ports, marks its shared network internal, applies read-only/capability r
 requires image values through operator environment variables; it never embeds credentials or
 deployment endpoints.
 
+Architecture Studio stores IR v1 and IR v2 as explicit versioned documents. Existing v1 semantic
+edits remain at `POST /v1/studios/:run_id/commands`. IR v2 package, resource, integration,
+secret-reference, binding, migration, and test-environment edits use
+`POST /v2/studios/:run_id/commands`. Both routes require an idempotency key and expected proposal
+head. The v2 route requires human edit authority, compiles the complete candidate before writing an
+immutable revision artifact, and never converts the document through an IR v1 core.
+
 ## Piston bring-up (one-time, local)
 
 ```bash
